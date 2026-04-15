@@ -7,6 +7,18 @@
 
 一个基于 PySide6 + Fluent Design 的 llama.cpp 服务端图形化启动器，用于在 Windows 上通过 WSL2 快速配置和启动带TurboQuant KVcache的 `llama-server`。
 
+3090 24G显存实测跑Qwen3.5-27B Q4, 显存吃23.1G，上下文能开256k，decode速度约30~35token/s
+![alt text](pics/memory_breakdown.png)
+
+<details>
+<summary>显存占用参考：</summary>
+
+Unsloth官方文档：[Unsloth](https://unsloth.ai/docs)
+
+![alt text](pics/image.png)
+
+</details>
+
 ## 功能特性
 - **一键部署** — 在 WSL2 中自动准备 Ubuntu 24.04、CUDA、llama.cpp-turboquant 和默认模型
 - **可视化参数配置** — 通过分页界面配置模型、采样、KV 缓存、GPU 加速、服务器等所有参数，无需手动拼接命令行
@@ -42,9 +54,9 @@
 - CUDA GPU 
 - BIOS 开启CPU虚拟化vt
 - [WSL](https://learn.microsoft.com/zh-cn/windows/wsl/install)（已安装并配置好 Linux 发行版）
-- 手动启动服务时需要 WSL 中已编译好的 [llama.cpp](https://github.com/ggerganov/llama.cpp)；也可以先使用「一键部署」自动准备
+- 手动启动服务时需要 WSL 中已编译好的 [llama.cpp](https://github.com/ggerganov/llama.cpp)；也可以使用「一键部署」自动准备
 - Python 3.10+
-- 推荐预留 50 GB 以上 WSL 系统空间；一键部署仅用于CUDA后端，CPU及其他后端未测试
+- 推荐预留 50 GB 以上 WSL 系统空间用于存放模型；一键部署仅用于CUDA后端，CPU及其他后端未测试
 
 
 
@@ -175,6 +187,20 @@ python .\launcher.py
 
 在基础设置页面确认命令预览无误后，点击底部「运行」按钮即可启动 `llama-server`。
 
+### 7.其他
+默认关闭了WSL分区访问windows路径，如要恢复，powershell输入：
+
+```
+wsl
+sudo nano /etc/wsl.conf
+```
+找到`[automount]`一项
+```
+[automount]
+enabled=false
+```
+改成``enable=true``
+然后ctrl+o 保存，回车，ctrl+x退出
 
 ## 支持的 llama-server 参数
 

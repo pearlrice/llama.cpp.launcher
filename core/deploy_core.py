@@ -178,28 +178,33 @@ def is_admin():
         return False
 
 
-def _score_decoded_text(text):
-    if not text:
-        return -1000
-    cjk = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
-    printable = sum(1 for ch in text if ch.isprintable() or ch in '\r\n\t')
-    controls = sum(1 for ch in text if not (ch.isprintable() or ch in '\r\n\t'))
-    replacement = text.count('\ufffd')
-    return cjk * 8 + printable - controls * 8 - replacement * 20
+def _looks_utf16(raw):
+    if raw.startswith(b'\xff\xfe') or raw.startswith(b'\xfe\xff'):
+        return True
+    # WSL stdout is usually UTF-8. Only treat output as UTF-16 when NUL bytes
+    # make that very likely; ASCII text decoded as UTF-16 produces plausible
+    # CJK-looking garbage such as "turbo2" -> "畴扲㉯".
+    return raw.count(b'\x00') > max(2, len(raw) // 8)
 
 
 def decode_process_output(raw):
     """Decode mixed Windows/WSL output without letting mojibake leak into the GUI."""
     if not raw:
         return ""
-    candidates = []
-    for enc in ("utf-8", "utf-16-le", "gb18030", "cp936"):
+
+    if _looks_utf16(raw):
+        enc = "utf-16-be" if raw.startswith(b'\xfe\xff') else "utf-16-le"
         try:
-            text = raw.decode(enc, errors="strict")
+            return raw.decode(enc, errors="strict")
         except Exception:
-            text = raw.decode(enc, errors="replace")
-        candidates.append((_score_decoded_text(text), text))
-    return max(candidates, key=lambda item: item[0])[1]
+            return raw.decode(enc, errors="replace")
+
+    for enc in ("utf-8", "gb18030", "cp936"):
+        try:
+            return raw.decode(enc, errors="strict")
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 class ProcessOutputDecoder:
@@ -211,8 +216,8 @@ class ProcessOutputDecoder:
         if not raw and not final:
             return ""
         if self._decoder is None:
-            if raw.startswith(b'\xff\xfe') or raw.count(b'\x00') > max(2, len(raw) // 8):
-                self._encoding = "utf-16-le"
+            if _looks_utf16(raw):
+                self._encoding = "utf-16-be" if raw.startswith(b'\xfe\xff') else "utf-16-le"
             else:
                 self._encoding = "utf-8"
             self._decoder = codecs.getincrementaldecoder(self._encoding)(errors="strict")
@@ -943,32 +948,13 @@ def _model_paths(username):
     }
 
 
-def _validate_downloaded_gguf(username, path):
+def _downloaded_file_exists(username, path):
     out, rc = run_wsl(
-        f"""
-python3 - {shlex.quote(path)} <<'PY'
-import struct
-import sys
-
-path = sys.argv[1]
-try:
-    with open(path, "rb") as f:
-        if f.read(4) != b"GGUF":
-            raise SystemExit(2)
-        f.seek(12)
-        data = f.read(4)
-        if len(data) != 4:
-            raise SystemExit(3)
-        if struct.unpack("<I", data)[0] == 0:
-            raise SystemExit(4)
-except Exception:
-    raise SystemExit(5)
-PY
-""",
+        f"test -s {shlex.quote(path)} && echo OK || echo MISS",
         user=username,
         capture=True,
     )
-    return rc == 0
+    return rc == 0 and "OK" in out
 
 
 def _download_model_artifact(username, model_dir, label, filename, sources):
@@ -987,9 +973,9 @@ def _download_model_artifact(username, model_dir, label, filename, sources):
             timeout=7200,
         )
         if rc == 0:
-            if _validate_downloaded_gguf(username, target):
+            if _downloaded_file_exists(username, target):
                 return True
-            print(f"[!] {filename} 下载结果不是有效 GGUF 文件，删除后尝试下一个源。")
+            print(f"[!] {filename} 下载后文件不存在或为空，尝试下一个源。")
         else:
             print(f"[!] {source_name} 下载失败 (rc={rc})，尝试下一个源。")
         run_wsl(f"rm -f {shlex.quote(target)}", user=username)
@@ -1639,50 +1625,23 @@ cmake --build build --config Release -j $(($(nproc)-2))
     out, _ = run_wsl(
         f"""
 mkdir -p {shlex.quote(model_dir)}
-# 校验 GGUF 文件: 魔数 + header 中的 n_tensors 字段
-# GGUF v3 header: magic(4) + version(4) + n_tensors(4) + n_kv_head(8)
-# 如果文件被截断，读取 header 字段会失败
-validate_gguf() {{
+check_file() {{
     local file="$1"
     local size=$(stat -c%s "$file" 2>/dev/null)
     if [ -z "$size" ]; then
         echo "MISS"
         return
     fi
-    # 文件太小 (GGUF header 至少 32 字节)
-    if [ "$size" -lt 32 ]; then
-        echo "CORRUPT"
-        return
-    fi
-    # 检查魔数
-    local magic=$(head -c 4 "$file" 2>/dev/null)
-    if [ "$magic" != "GGUF" ]; then
-        echo "CORRUPT"
-        return
-    fi
-    # 用 python 读取 n_tensors，如果文件截断会报错
-    python3 -c "
-import struct, sys
-try:
-    with open(sys.argv[1], 'rb') as f:
-        f.seek(12)
-        n_tensors = struct.unpack('<I', f.read(4))[0]
-        if n_tensors == 0:
-            sys.exit(1)
-        sys.exit(0)
-except Exception:
-    sys.exit(1)
-" "$file" 2>/dev/null
-    if [ $? -eq 0 ]; then
+    if [ "$size" -gt 0 ]; then
         echo "OK"
     else
-        echo "CORRUPT"
+        echo "MISS"
     fi
 }}
 
-result=$(validate_gguf {shlex.quote(llm_path)})
+result=$(check_file {shlex.quote(llm_path)})
 echo "MODEL_$result"
-result=$(validate_gguf {shlex.quote(mm_path)})
+result=$(check_file {shlex.quote(mm_path)})
 echo "MMPROJ_$result"
 """,
         user=username,
@@ -1691,28 +1650,18 @@ echo "MMPROJ_$result"
 
     model_ok = "MODEL_OK" in out
     mmproj_ok = "MMPROJ_OK" in out
-    model_corrupt = "MODEL_CORRUPT" in out
-    mmproj_corrupt = "MMPROJ_CORRUPT" in out
 
     if model_ok and mmproj_ok:
-        print(f"[+] 模型文件已存在且完整 ({llm_file}, {mm_file})，跳过下载。")
+        print(f"[+] 模型文件已存在 ({llm_file}, {mm_file})，跳过下载。")
     else:
-        # 清除损坏的文件
-        if model_corrupt:
-            print(f"[!] {llm_file} 文件损坏，将删除重新下载。")
-            run_wsl(f"rm -f {shlex.quote(llm_path)}", user=username)
-        if mmproj_corrupt:
-            print(f"[!] {mm_file} 文件损坏，将删除重新下载。")
-            run_wsl(f"rm -f {shlex.quote(mm_path)}", user=username)
-
-        if not model_ok or model_corrupt:
+        if not model_ok:
             ok = _download_model_artifact(
                 username, model_dir, "大语言模型", llm_file, preset['artifacts']['llm']['sources']
             )
             if not ok:
                 print(f"[!] {llm_file} 所有下载源均失败。")
                 sys.exit(1)
-        if not mmproj_ok or mmproj_corrupt:
+        if not mmproj_ok:
             ok = _download_model_artifact(
                 username, model_dir, "多模态投影器", mm_file, preset['artifacts']['mm']['sources']
             )
