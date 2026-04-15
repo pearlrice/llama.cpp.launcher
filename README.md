@@ -48,65 +48,35 @@
 
 
 
-## 安装 / 打包
-
-普通用户只需要克隆仓库后运行构建脚本，脚本会自动创建虚拟环境、安装依赖、打包 exe，并把可直接双击的 `llama.cpp.launcher.exe` 复制到项目根目录：
+## 安装 
 
 ```powershell
 git clone https://github.com/pearlrice/llama.cpp.launcher.git
 cd llama.cpp.launcher
-.\build_portable.bat
 ```
 
-构建完成后可直接双击：
+### 自动安装脚本：
+``build_portable.bat``
 
-```text
-llama.cpp.launcher.exe
-```
+1.双击运行```build_portable.bat```会在根目录生成exe
 
-开发调试时仍可手动运行源码：
+2.双击```llama.cpp.launcher.exe```运行启动器
 
+
+
+
+### 手动：
 ```powershell
+git clone https://github.com/pearlrice/llama.cpp.launcher.git
+cd llama.cpp.launcher
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+
+# 运行：
 python .\launcher.py
+
 ```
-
-## 使用方法
-
-### 1. 打包结果
-
-`build_portable.bat` 会生成：
-
-- `llama.cpp.launcher.exe`：复制到项目根目录，直接双击运行。
-- `dist\llama.cpp.launcher.exe`：PyInstaller 原始输出副本。如果旧文件被 Windows 临时锁住，根目录 exe 仍然会正常生成。
-
-```text
-llama.cpp.launcher/
-├── llama.cpp.launcher.exe
-├── core/
-│   ├── config.json              # 用户运行配置
-│   ├── default_config.json      # 默认配置模板
-│   ├── deploy_result.json       # 部署完成后的临时结果文件
-│   ├── autodeploy.py
-│   ├── deploy_core.py
-│   ├── model_presets.py
-│   └── build_portable.ps1
-├── icon.ico
-├── LICENSE
-├── README.md
-└── ubuntu-24.04.4-wsl-amd64.wsl  # 可选，如果项目目录中存在
-```
-
-打包完成后不需要再激活虚拟环境。启动器 exe 会优先使用同目录 `core/` 里的部署脚本；如果没有外置 `core/`，则回退使用打包进 exe 的部署脚本。
-
-`core/config.json` 是唯一用户配置文件，里面同时保存模型/服务器参数和启动器设置。`core/default_config.json` 是默认模板。`core/deploy_result.json` 是一键部署子进程写给启动器的临时结果文件，启动器读取后会把部署得到的模型路径、执行路径、端口等写回 `core/config.json`。
-
-### 2. 点击一键部署，等待
-
-
-### 3. 点击首页的运行
 
 
 
@@ -160,7 +130,6 @@ llama.cpp.launcher/
 
 **部署逻辑：**
 
-- 启动器源码模式会调用 `core/autodeploy.py`；打包模式会用 `llama.cpp.launcher.exe --run-autodeploy` 调起内置部署入口。
 - 检查 WSL2 和 `Ubuntu-24.04` 是否真实可用。
 - 优先使用程序目录下已有的 `.wsl` 镜像。
 - 没有本地镜像时，先下载 Ubuntu 官方 `.wsl` 镜像；官方源测速低于 2 MB/s 或下载失败时，会依次切换阿里云、中山大学备用源。
@@ -177,7 +146,7 @@ llama.cpp.launcher/
 - 部署成功（服务器成功推理）后会自动进入锁定状态。
 
 
-### 5. 配置参数
+### 4. 配置参数
 
 应用包含五个页面：
 
@@ -190,7 +159,7 @@ llama.cpp.launcher/
 | **运行日志** | 终端输出、启动/停止/清空控制 |
 | **设置** | 语言、主题、字体比例、参数重置、启动器设置重置 |
 
-### 6. 启动器设置
+### 5. 启动器设置
 
 左下角齿轮图标进入启动器设置。
 
@@ -202,12 +171,9 @@ llama.cpp.launcher/
 - 还原所有参数设置为默认：读取 `core/default_config.json` 并写回 `core/config.json`
 - 还原启动器设置：恢复语言、主题、字体比例
 
-当前语言切换会翻译导航、页面标题、分组标题、卡片标题和主要说明文本；模型名、路径、缓存精度等技术值保持原样。
-
-### 7. 运行
+### 6. 运行
 
 在基础设置页面确认命令预览无误后，点击底部「运行」按钮即可启动 `llama-server`。
-
 
 
 ## 支持的 llama-server 参数
