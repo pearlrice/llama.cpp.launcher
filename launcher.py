@@ -5,6 +5,7 @@ import re
 import json
 import codecs
 import subprocess
+import time
 
 
 def _launcher_base_dir():
@@ -109,6 +110,11 @@ DEFAULT_MODEL_SEARCH_PATHS = [
     '/home/{user}/gguf_models',
     '/home/{user}/llama-cpp-turboquant',
 ]
+TERMINAL_MAX_BLOCKS = 2000
+TERMINAL_FLUSH_INTERVAL_MS = 100
+TERMINAL_BUFFER_CHAR_LIMIT = 262144
+WORKER_EMIT_INTERVAL_SEC = 0.05
+WORKER_EMIT_CHAR_LIMIT = 65536
 DEFAULT_LAUNCHER_CONFIG = {
     'language': 'CH',
     'theme': '深色',
@@ -968,17 +974,34 @@ class TerminalWorker(QThread):
                 env = os.environ.copy()
                 env.update(self._env)
             self._process = subprocess.Popen(self._command, env=env, cwd=self._cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE, startupinfo=si, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+            pending = []
+            pending_chars = 0
+            last_emit = time.monotonic()
+
+            def flush_pending():
+                nonlocal pending, pending_chars, last_emit
+                if pending:
+                    self.dataReady.emit(''.join(pending))
+                    pending = []
+                    pending_chars = 0
+                last_emit = time.monotonic()
+
             while True:
-                raw = self._process.stdout.read1(4096)
+                raw = self._process.stdout.read1(16384)
                 if not raw:
                     break
                 text = self._decodeOutput(raw)
                 if text:
-                    self.dataReady.emit(text)
+                    pending.append(text)
+                    pending_chars += len(text)
+                    if pending_chars >= WORKER_EMIT_CHAR_LIMIT or time.monotonic() - last_emit >= WORKER_EMIT_INTERVAL_SEC:
+                        flush_pending()
             if self._decoder is not None:
                 tail = self._decoder.decode(b'', final=True)
                 if tail:
-                    self.dataReady.emit(tail)
+                    pending.append(tail)
+                    pending_chars += len(tail)
+            flush_pending()
             self._process.wait()
             self.processFinished.emit(self._process.returncode)
         except Exception as e:
@@ -1038,6 +1061,7 @@ class TerminalTextEdit(QPlainTextEdit):
         self.setReadOnly(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.setMaximumBlockCount(TERMINAL_MAX_BLOCKS)
         self.setStyleSheet('QPlainTextEdit { background-color: #1e1e1e; color: #cccccc; border: 1px solid #333333; border-radius: 4px; padding: 8px; selection-background-color: #264f78; }')
 
     def keyPressEvent(self, event):
@@ -1079,6 +1103,11 @@ class LogInterface(QWidget):
         super().__init__(parent=parent)
         self.setObjectName('log-interface')
         self.worker = None
+        self._logBuffer = []
+        self._logBufferChars = 0
+        self._logTimer = QTimer(self)
+        self._logTimer.setInterval(TERMINAL_FLUSH_INTERVAL_MS)
+        self._logTimer.timeout.connect(self._flushLogBuffer)
 
         mainLayout = QVBoxLayout(self)
         mainLayout.setContentsMargins(36, 20, 36, 20)
@@ -1179,6 +1208,8 @@ class LogInterface(QWidget):
             InfoBar.warning(title='进程正在运行', content='请先停止当前进程', orient=Qt.Horizontal, isClosable=False, position=InfoBarPosition.TOP, duration=2000, parent=self.window())
             return
         self.logText.clear()
+        self._logBuffer.clear()
+        self._logBufferChars = 0
         self.worker = TerminalWorker(self)
         self.worker.dataReady.connect(self._appendOutput)
         self.worker.processFinished.connect(self._onProcessFinished)
@@ -1186,6 +1217,7 @@ class LogInterface(QWidget):
         gpu_mem = self._queryGpuMemory()
         self._gpuLaunchBaselineUsedG = gpu_mem[0] if gpu_mem else None
         self.worker.start_process(command)
+        self._logTimer.start()
         self.launchBtn.setEnabled(False)
         self.stopBtn.setEnabled(True)
         self.logText.setFocus()
@@ -1198,13 +1230,33 @@ class LogInterface(QWidget):
         text = re.sub(r'\n{2,}', '\n', text)
         if not text:
             return
+        self._logBuffer.append(text)
+        self._logBufferChars += len(text)
+        if self._logBufferChars > TERMINAL_BUFFER_CHAR_LIMIT:
+            combined = ''.join(self._logBuffer)
+            kept = combined[-TERMINAL_BUFFER_CHAR_LIMIT:]
+            self._logBuffer = ['\n--- 日志输出过快，已丢弃部分未显示内容 ---\n', kept]
+            self._logBufferChars = sum(len(part) for part in self._logBuffer)
+        if self._logBufferChars >= WORKER_EMIT_CHAR_LIMIT:
+            self._flushLogBuffer()
+
+    def _flushLogBuffer(self):
+        if not self._logBuffer:
+            return
+        combined = ''.join(self._logBuffer)
+        self._logBuffer.clear()
+        self._logBufferChars = 0
+        if not combined:
+            return
         cursor = self.logText.textCursor()
         cursor.movePosition(QTextCursor.End)
-        cursor.insertText(text)
+        cursor.insertText(combined)
         self.logText.setTextCursor(cursor)
         self.logText.ensureCursorVisible()
 
     def _onProcessFinished(self, exit_code):
+        self._logTimer.stop()
+        self._flushLogBuffer()
         cursor = self.logText.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.insertText(f'\n--- 进程已退出 (exit code: {exit_code}) ---\n')
