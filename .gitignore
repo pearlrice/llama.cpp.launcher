@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 *.egg-info/
 *.egg
+.venv/
+venv/
 
 # 构建产物
 build/
@@ -11,11 +13,27 @@ dist/
 *.exe
 
 # 用户配置
-# config.json
+config.json
+launcher.json
+core/config.json
+deploy_state.json
+deploy_result.json
+core/deploy_state.json
+core/deploy_result.json
+ubuntu_credentials.txt
+core/ubuntu_credentials.txt
+
+# 大文件/离线安装包
+*.wsl
+*.wsl.part
+*.msi
+cuda_*.run
+wsl_update_x64.msi
 
 # IDE
 .vscode/
 .idea/
+.history/
 *.code-workspace
 .DS_Store
 Thumbs.db

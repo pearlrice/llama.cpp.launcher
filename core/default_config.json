@@ -1,0 +1,48 @@
+{
+  "exec_path": "~/llama-cpp-turboquant/build/bin/llama-server",
+  "model_search_path": [
+    "/home/{user}/model",
+    "/home/{user}/models",
+    "/home/{user}/gguf_models",
+    "/home/{user}/llama-cpp-turboquant"
+  ],
+  "llm_model": "",
+  "mm_model": "无",
+  "ctx_length": "128",
+  "predict_length": "12800",
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 64,
+  "repeat_penalty": 1.0,
+  "repeat_last_n": 62,
+  "cache_type_k": "turbo3",
+  "cache_type_v": "turbo3",
+  "cache_ram": "16384",
+  "flash_attention": "auto",
+  "image_min_tokens": "1024",
+  "ngl": 999,
+  "main_gpu": 0,
+  "tensor_split": "",
+  "nommap": "no-mmap",
+  "numa": "关闭",
+  "host": "0.0.0.0",
+  "port": 8888,
+  "api_key": "",
+  "threads": -1,
+  "batch_size": 1024,
+  "ubatch_size": 512,
+  "parallel": 1,
+  "timeout": 600,
+  "verbose": "关闭",
+  "metrics": "关闭",
+  "webui": "启用",
+  "models": {
+    "llm": {},
+    "mm": {}
+  },
+  "launcher": {
+    "language": "CH",
+    "theme": "深色",
+    "font_scale": 100
+  }
+}

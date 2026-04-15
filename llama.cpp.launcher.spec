@@ -2,11 +2,18 @@
 
 
 a = Analysis(
-    ['llama.cpp.launcher.py'],
+    ['launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[('icon.ico', '.')],
-    hiddenimports=[],
+    datas=[
+        ('icon.ico', '.'),
+        ('core/__init__.py', 'core'),
+        ('core/autodeploy.py', 'core'),
+        ('core/deploy_core.py', 'core'),
+        ('core/model_presets.py', 'core'),
+        ('core/default_config.json', 'core'),
+    ],
+    hiddenimports=['core.deploy_core', 'core.model_presets'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

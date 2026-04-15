@@ -1,20 +1,30 @@
 # 作者的话
-本项目代码和文档99.9%由AI生成，作者不怎么会python，有问题就问AI吧。  
+本项目代码包括文档95%由AI生成，有问题就问AI吧。  
 
 --- 
 
 # llama.cpp Launcher
 
-一个基于 PySide6 + Fluent Design 的 llama.cpp 服务端图形化启动器，用于在 Windows 上通过 WSL 快速配置和启动 `llama-server`。
+一个基于 PySide6 + Fluent Design 的 llama.cpp 服务端图形化启动器，用于在 Windows 上通过 WSL2 快速配置和启动带TurboQuant KVcache的 `llama-server`。
 
 ## 功能特性
-
+- **一键部署** — 在 WSL2 中自动准备 Ubuntu 24.04、CUDA、llama.cpp-turboquant 和默认模型
 - **可视化参数配置** — 通过分页界面配置模型、采样、KV 缓存、GPU 加速、服务器等所有参数，无需手动拼接命令行
 - **实时命令预览** — 基础设置页面实时显示最终拼接的完整 WSL 启动命令
-- **模型管理** — 通过 `models.csv` 维护模型列表，支持大语言模型和多模态模型的下拉选择
+- **模型管理** — 支持按 WSL 搜索路径扫描真实存在的 `.gguf` 模型，避免硬编码某台机器的模型路径
+- **部署防误触** — 开始部署前二次确认；一键部署页支持锁定，解锁需要双击
+- **启动器设置** — 左下角齿轮入口支持语言、主题、字体比例和配置重置
 - **内嵌终端** — 运行日志页面直接显示 `llama-server` 的输出，支持启动/停止/清空操作
-- **配置持久化** — 所有参数自动保存为 `config.json`，下次启动时自动恢复
+- **配置持久化** — 运行参数和启动器偏好统一保存到 `core/config.json`
 - **一键打包** — 支持通过 PyInstaller 打包为独立 `.exe` 文件
+
+
+
+## 来源说明
+- **推理后端:** [llama.cpp](https://github.com/ggml-org/llama.cpp)
+- **TurboQuant 支持:** [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant)
+- **GGUF 模型:** [Unsloth](https://unsloth.ai/docs)
+
 
 ## 截图
 
@@ -29,73 +39,180 @@
 ## 环境要求
 
 - Windows 10/11
+- CUDA GPU 
+- BIOS 开启CPU虚拟化vt
 - [WSL](https://learn.microsoft.com/zh-cn/windows/wsl/install)（已安装并配置好 Linux 发行版）
-- WSL 中已编译好的 [llama.cpp](https://github.com/ggerganov/llama.cpp)（需要 `llama-server` 可执行文件）
+- 手动启动服务时需要 WSL 中已编译好的 [llama.cpp](https://github.com/ggerganov/llama.cpp)；也可以先使用「一键部署」自动准备
 - Python 3.10+
+- 推荐预留 50 GB 以上 WSL 系统空间；一键部署仅用于CUDA后端，CPU及其他后端未测试
 
-## 安装
 
-```bash
-# 克隆仓库
-git clone https://github.com/yourname/llama.cpp.launcher.git
+
+## 安装 / 打包
+
+普通用户只需要克隆仓库后运行构建脚本，脚本会自动创建虚拟环境、安装依赖、打包 exe，并把可直接双击的 `llama.cpp.launcher.exe` 复制到项目根目录：
+
+```powershell
+git clone https://github.com/pearlrice/llama.cpp.launcher.git
 cd llama.cpp.launcher
+.\build_portable.bat
+```
 
-# 安装依赖
+构建完成后可直接双击：
+
+```text
+llama.cpp.launcher.exe
+```
+
+开发调试时仍可手动运行源码：
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+python .\launcher.py
 ```
 
 ## 使用方法
 
-### 1. 配置模型列表
+### 1. 打包结果
 
-编辑 `models.csv`，按以下格式添加模型：
+`build_portable.bat` 会生成：
 
-```csv
-m,显示名称,WSL中的模型绝对路径
-mm,多模态模型显示名,WSL中的mmproj文件路径
+- `llama.cpp.launcher.exe`：复制到项目根目录，直接双击运行。
+- `dist\llama.cpp.launcher.exe`：PyInstaller 原始输出副本。如果旧文件被 Windows 临时锁住，根目录 exe 仍然会正常生成。
+
+```text
+llama.cpp.launcher/
+├── llama.cpp.launcher.exe
+├── core/
+│   ├── config.json              # 用户运行配置
+│   ├── default_config.json      # 默认配置模板
+│   ├── deploy_result.json       # 部署完成后的临时结果文件
+│   ├── autodeploy.py
+│   ├── deploy_core.py
+│   ├── model_presets.py
+│   └── build_portable.ps1
+├── icon.ico
+├── LICENSE
+├── README.md
+└── ubuntu-24.04.4-wsl-amd64.wsl  # 可选，如果项目目录中存在
 ```
 
-示例：
+打包完成后不需要再激活虚拟环境。启动器 exe 会优先使用同目录 `core/` 里的部署脚本；如果没有外置 `core/`，则回退使用打包进 exe 的部署脚本。
 
-```csv
-m,Qwen3.5-27B,/home/user/models/qwen3.5-27b-q4.gguf
-mm,Qwen3.5-mmproj,/home/user/models/mmproj-f16.gguf
+`core/config.json` 是唯一用户配置文件，里面同时保存模型/服务器参数和启动器设置。`core/default_config.json` 是默认模板。`core/deploy_result.json` 是一键部署子进程写给启动器的临时结果文件，启动器读取后会把部署得到的模型路径、执行路径、端口等写回 `core/config.json`。
+
+### 2. 点击一键部署，等待
+
+
+### 3. 点击首页的运行
+
+
+
+
+---------------------------------------------------------------------
+
+
+## 启动器参数和逻辑
+
+### 1. 配置文件
+
+| 文件 | 用途 | 
+|------|------|
+| `core/default_config.json` | 默认配置模板，「还原所有参数设置为默认」会读取它 | 
+| `core/config.json` | 用户运行参数、模型搜索路径、已扫描模型列表、语言、主题、字体比例 |
+| `core/deploy_result.json` | 一键部署完成后的结果文件，启动器读取后更新配置 | 
+
+首次运行时，如果没有 `core/config.json`，启动器会读取 `core/default_config.json` 作为默认值；正常关闭启动器后会把配置写入 `core/config.json`。  
+启动器设置已经合并到 `core/config.json` 的 `launcher` 字段中，不再维护单独的 `launcher.json`。
+
+### 2. 配置模型列表
+
+`core/config.json` 是用户配置文件。模型列表保存在 `models` 字段中，但默认不再写死某台机器的路径；用户可以在「基础设置」的「模型搜索路径」中填写 WSL 目录，然后点击「刷新本地模型列表」扫描实际存在的 `.gguf` 文件。
+
+```json
+{
+  "models": {
+    "llm": {
+      "Qwen3.5-27B-UD-Q4_K_XL": "/home/user/models/qwen3.5/Qwen3.5-27B-UD-Q4_K_XL.gguf"
+    },
+    "mm": {
+      "Qwen3.5-mmproj-F16": "/home/user/models/qwen3.5/qwen-mmproj-F16.gguf"
+    }
+  }
+}
 ```
 
-- `m` 表示大语言模型，`mm` 表示多模态投影器
 - 路径为 WSL 内的 Linux 路径
+- 默认搜索 `/home/{user}/model`、`/home/{user}/models`、`/home/{user}/gguf_models`、`/home/{user}/llama-cpp-turboquant`
+- 一键部署完成后会自动把默认模型和启动参数写回 `core/config.json`
 
-### 2. 启动应用
+一键部署下载的模型默认放在：
 
-```bash
-python llama.cpp.launcher
+```text
+/home/<user>/gguf_models/<preset>/
 ```
 
-### 3. 配置参数
+每个模型预设使用独立子目录，避免不同模型的 `mmproj` 文件混淆。
 
-应用包含四个页面：
+### 3. 一键部署
+
+**部署逻辑：**
+
+- 启动器源码模式会调用 `core/autodeploy.py`；打包模式会用 `llama.cpp.launcher.exe --run-autodeploy` 调起内置部署入口。
+- 检查 WSL2 和 `Ubuntu-24.04` 是否真实可用。
+- 优先使用程序目录下已有的 `.wsl` 镜像。
+- 没有本地镜像时，先下载 Ubuntu 官方 `.wsl` 镜像；官方源测速低于 2 MB/s 或下载失败时，会依次切换阿里云、中山大学备用源。
+- 支持在一键部署页选择预设模型：默认 `Qwen3.5-9B`，也可选 `Qwen3.5-27B`、`Gemma 4 31B`；每个预设优先 HuggingFace，失败后回退 ModelScope。
+- 预设模型下载到 `/home/<user>/gguf_models/<preset>/`，同一预设的 LLM 和 mmproj 放在同一个子目录中。
+- 最后才尝试从缓慢的微软服务器下载（不推荐） `wsl --install --web-download`。
+- 部署完成后写入 `core/deploy_result.json`，启动器读取它并更新 `core/config.json`。
+
+一键部署页有 **防误触** 机制：
+
+- 点击「开始部署」前会弹出二次确认。
+- 标题右侧有「锁定」和「双击解锁」按钮。
+- 锁定后部署配置和操作按钮不可用，部署日志仍可选择和复制。
+- 部署成功（服务器成功推理）后会自动进入锁定状态。
+
+
+### 5. 配置参数
+
+应用包含五个页面：
 
 | 页面 | 内容 |
 |------|------|
-| **基础设置** | 程序路径、命令预览、运行按钮 |
+| **基础设置** | 程序路径、模型搜索路径、模型选择、命令预览、运行按钮 |
+| **一键部署** | WSL 用户名、密码、安装目录、部署日志、阶段状态 |
 | **模型设置** | 模型选择、采样参数、KV 缓存、多模态、GPU 加速 |
 | **服务器设置** | 网络配置、性能参数、功能开关 |
 | **运行日志** | 终端输出、启动/停止/清空控制 |
+| **设置** | 语言、主题、字体比例、参数重置、启动器设置重置 |
 
-### 4. 运行
+### 6. 启动器设置
+
+左下角齿轮图标进入启动器设置。
+
+支持：
+
+- 语言：`CH` / `EN`
+- UI 颜色：深色、浅色、跟随系统
+- 字体大小：`80%` 到 `130%`，步进 `5%`
+- 还原所有参数设置为默认：读取 `core/default_config.json` 并写回 `core/config.json`
+- 还原启动器设置：恢复语言、主题、字体比例
+
+当前语言切换会翻译导航、页面标题、分组标题、卡片标题和主要说明文本；模型名、路径、缓存精度等技术值保持原样。
+
+### 7. 运行
 
 在基础设置页面确认命令预览无误后，点击底部「运行」按钮即可启动 `llama-server`。
 
-## 打包为 EXE
 
-```bash
-pyinstaller llama启动器.spec
-```
-
-打包后将 `dist/llama启动器.exe` 与 `models.csv` 放在同一目录下即可使用。
 
 ## 支持的 llama-server 参数
 
+**此处设置参考官方llama-server,根据模型不同而不同**
 <details>
 <summary>点击展开完整参数列表</summary>
 
@@ -113,7 +230,6 @@ pyinstaller llama启动器.spec
 | 缓存 | `--cache-type-k/v` | K/V 缓存精度 |
 | 缓存 | `--cache-ram` | KV 缓存大小 |
 | 缓存 | `--flash-attn` | Flash Attention |
-| 多模态 | `--image-max-tokens` | 图像最大 Token 数 |
 | 多模态 | `--image-min-tokens` | 图像最小 Token 数 |
 | GPU | `-ngl` | GPU 卸载层数 |
 | GPU | `-mg` | 主 GPU 设备 ID |
@@ -134,19 +250,6 @@ pyinstaller llama启动器.spec
 
 </details>
 
-## 项目结构
-
-```
-llama.cpp.launcher/
-├── llama.cpp.launcher    # 主程序
-├── models.csv            # 模型配置表
-├── config.json           # 运行时自动生成的参数配置（已 gitignore）
-├── llama启动器.spec       # PyInstaller 打包配置
-├── pics/                 # 截图
-├── requirements.txt      # Python 依赖
-├── LICENSE
-└── README.md
-```
 
 ## 许可证
 
