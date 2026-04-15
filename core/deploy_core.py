@@ -56,6 +56,7 @@ OFFICIAL_WSL_MIN_SPEED_MBPS = 1.0
 # CUDA Toolkit 12.9.1
 CUDA_RUN = "cuda_12.9.1_575.57.08_linux.run"
 CUDA_URL = r"https://developer.download.nvidia.com/compute/cuda/12.9.1/local_installers/cuda_12.9.1_575.57.08_linux.run"
+CUDA_RUN_SIZE = 5860276058
 
 # llama.cpp turboquant
 REPO_URL = "https://github.com/TheTom/llama-cpp-turboquant.git"
@@ -1432,19 +1433,56 @@ fi
             print("[!] 无法连接 NVIDIA 下载服务器，请检查网络。")
             sys.exit(1)
 
-        print("[*] 下载 CUDA 安装包 (约 4GB，需要一些时间)...")
-        run_wsl_sudo(
+        print("[*] 下载 CUDA 安装包 (约 5.5GB，需要一些时间)...")
+        rc = run_wsl_sudo(
             f"""
+set -euo pipefail
 cd {home}
-wget -nc {CUDA_URL}
-chmod +x {CUDA_RUN}
-sudo ./{CUDA_RUN} --silent --toolkit --override --nox11
-rm -f {CUDA_RUN}
+CUDA_RUN={shlex.quote(CUDA_RUN)}
+CUDA_URL={shlex.quote(CUDA_URL)}
+CUDA_SIZE={CUDA_RUN_SIZE}
+
+check_cuda_file() {{
+    [ -f "$CUDA_RUN" ] || return 1
+    ACTUAL=$(stat -c%s "$CUDA_RUN" 2>/dev/null || echo 0)
+    if [ "$ACTUAL" -eq "$CUDA_SIZE" ]; then
+        echo "[+] CUDA 安装包校验通过: $ACTUAL bytes"
+        return 0
+    fi
+    echo "[!] CUDA 安装包不完整: $ACTUAL/$CUDA_SIZE bytes，删除后重新下载"
+    rm -f "$CUDA_RUN" "$CUDA_RUN.part"
+    return 1
+}}
+
+if ! check_cuda_file; then
+    for TRY in 1 2 3; do
+        echo "[*] 下载 CUDA 安装包 (第 $TRY/3 次)..."
+        if ! wget -c --progress=bar:force:noscroll --timeout=30 --tries=3 "$CUDA_URL" -O "$CUDA_RUN"; then
+            echo "[!] CUDA 下载命令失败，将检查文件完整性后决定是否重试。"
+        fi
+        if check_cuda_file; then
+            break
+        fi
+        if [ "$TRY" -eq 3 ]; then
+            echo "[!] CUDA 安装包下载 3 次后仍不完整，终止部署。"
+            exit 1
+        fi
+    done
+fi
+
+chmod +x "$CUDA_RUN"
+echo "[*] 执行 CUDA Toolkit 安装器..."
+sudo ./"$CUDA_RUN" --silent --toolkit --override --nox11
+test -x /usr/local/cuda-12.9/bin/nvcc
+rm -f "$CUDA_RUN"
 """,
             username=username,
             password=password,
-            timeout=1800,
+            timeout=7200,
         )
+        if rc != 0:
+            print(f"[!] CUDA Toolkit 安装失败 (rc={rc})，请查看上方日志。")
+            sys.exit(1)
         print("[+] CUDA Toolkit 安装完成。")
 
     # ── [5/5] CUDA 环境变量 ──
