@@ -2537,7 +2537,10 @@ done
             label = combo.itemText(idx)
             path = path_map.get(label)
             if path:
-                combo.setItemData(idx, path, Qt.ToolTipRole)
+                try:
+                    combo.setItemData(idx, path)
+                except Exception:
+                    pass
 
     def _setModelMaps(self, llm_models, mm_models, current_llm=None, current_mm=None, prefer_sibling_mm=False):
         bi = self.basicInterface
