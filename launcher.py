@@ -2011,7 +2011,7 @@ class MainWindow(MSFluentWindow):
 
         bi.execPathEdit.textChanged.connect(self._updateCommandPreview)
 
-        bi.llmCombo.currentIndexChanged.connect(self._updateCommandPreview)
+        bi.llmCombo.currentIndexChanged.connect(self._onLlmModelChanged)
         bi.mmCombo.currentIndexChanged.connect(self._updateCommandPreview)
         bi.modelSearchPathEdit.textChanged.connect(self._updateCommandPreview)
         bi.refreshModelsBtn.clicked.connect(self.refreshLocalModels)
@@ -2058,6 +2058,16 @@ class MainWindow(MSFluentWindow):
     def _onRunBtnClicked(self):
         self.switchTo(self.logInterface)
         self._onLaunch()
+
+    def _onLlmModelChanged(self, *_):
+        bi = self.basicInterface
+        sibling_mm = self._siblingMmForLlm(bi.llmCombo.currentText())
+        target_mm = sibling_mm or '无'
+        if bi.mmCombo.currentText() != target_mm:
+            bi.mmCombo.blockSignals(True)
+            bi.mmCombo.setCurrentText(target_mm)
+            bi.mmCombo.blockSignals(False)
+        self._updateCommandPreview()
 
     def _normalizedLogVerbosity(self, value=None):
         raw = self.serverInterface.verboseCombo.currentText() if value is None else value
@@ -2450,9 +2460,19 @@ class MainWindow(MSFluentWindow):
                 paths.append(p)
         return paths
 
-    def _modelDisplayName(self, path):
+    def _parentDirName(self, path):
+        normalized = path.rstrip('/').replace('\\', '/')
+        parent = normalized.rsplit('/', 1)[0] if '/' in normalized else ''
+        return parent.rstrip('/').rsplit('/', 1)[-1] if parent else ''
+
+    def _modelDisplayName(self, path, include_parent=False):
         filename = path.rstrip('/').split('/')[-1]
-        return filename[:-5] if filename.lower().endswith('.gguf') else filename
+        name = filename[:-5] if filename.lower().endswith('.gguf') else filename
+        if include_parent:
+            parent = self._parentDirName(path)
+            if parent:
+                return f'{name} @ {parent}'
+        return name
 
     def _isModelCandidate(self, path):
         name = path.rstrip('/').split('/')[-1].lower()
@@ -2466,6 +2486,10 @@ class MainWindow(MSFluentWindow):
 
     def _addUniqueModel(self, models, name, path):
         candidate = name
+        if candidate in models and models[candidate] != path:
+            parent = self._parentDirName(path)
+            if parent:
+                candidate = f'{name} @ {parent}'
         idx = 2
         while candidate in models and models[candidate] != path:
             candidate = f"{name} ({idx})"
@@ -2496,12 +2520,39 @@ done
                 seen.add(path)
         return files, result.returncode, output
 
-    def _setModelMaps(self, llm_models, mm_models, current_llm=None, current_mm=None):
+    def _siblingMmForLlm(self, llm_name):
+        bi = self.basicInterface
+        llm_path = bi.llmPaths.get(llm_name)
+        if not llm_path:
+            return None
+        llm_dir = os.path.dirname(llm_path.rstrip('/').replace('\\', '/'))
+        for mm_name, mm_path in bi.mmPaths.items():
+            normalized = mm_path.rstrip('/').replace('\\', '/')
+            if os.path.dirname(normalized) == llm_dir and 'mmproj' in os.path.basename(normalized).lower():
+                return mm_name
+        return None
+
+    def _setComboPathTooltips(self, combo, path_map):
+        for idx in range(combo.count()):
+            label = combo.itemText(idx)
+            path = path_map.get(label)
+            if path:
+                combo.setItemData(idx, path, Qt.ToolTipRole)
+
+    def _setModelMaps(self, llm_models, mm_models, current_llm=None, current_mm=None, prefer_sibling_mm=False):
         bi = self.basicInterface
         bi.llmPaths = llm_models
         bi.mmPaths = mm_models
-        self._resetComboItems(bi.llmCombo, list(bi.llmPaths.keys()), current_llm)
-        self._resetComboItems(bi.mmCombo, ['无'] + list(bi.mmPaths.keys()), current_mm or '无')
+        selected_llm = current_llm if current_llm in bi.llmPaths else next(iter(bi.llmPaths), None)
+        sibling_mm = self._siblingMmForLlm(selected_llm) if selected_llm else None
+        if prefer_sibling_mm:
+            selected_mm = sibling_mm or '无'
+        else:
+            selected_mm = current_mm if current_mm in bi.mmPaths else (sibling_mm or '无')
+        self._resetComboItems(bi.llmCombo, list(bi.llmPaths.keys()), selected_llm)
+        self._resetComboItems(bi.mmCombo, ['无'] + list(bi.mmPaths.keys()), selected_mm)
+        self._setComboPathTooltips(bi.llmCombo, bi.llmPaths)
+        self._setComboPathTooltips(bi.mmCombo, bi.mmPaths)
 
     def refreshLocalModels(self):
         bi = self.basicInterface
@@ -2534,8 +2585,9 @@ done
         for path in files:
             if not self._isModelCandidate(path):
                 continue
-            name = self._modelDisplayName(path)
-            if 'mmproj' in name.lower():
+            is_mmproj = 'mmproj' in path.rstrip('/').split('/')[-1].lower()
+            name = self._modelDisplayName(path, include_parent=is_mmproj)
+            if is_mmproj:
                 self._addUniqueModel(mm_models, name, path)
             else:
                 self._addUniqueModel(llm_models, name, path)
@@ -2555,6 +2607,7 @@ done
             mm_models,
             current_llm if current_llm in llm_models else next(iter(llm_models), None),
             current_mm if current_mm in mm_models else ('无' if not mm_models else next(iter(mm_models))),
+            prefer_sibling_mm=True,
         )
         self._updateCommandPreview()
         self._saveConfig()
