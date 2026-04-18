@@ -115,6 +115,19 @@ TERMINAL_FLUSH_INTERVAL_MS = 100
 TERMINAL_BUFFER_CHAR_LIMIT = 262144
 WORKER_EMIT_INTERVAL_SEC = 0.05
 WORKER_EMIT_CHAR_LIMIT = 65536
+LOG_VERBOSITY_LEVELS = {
+    'warn': '2',
+    'info': '3',
+    'debug': '4',
+}
+LEGACY_LOG_VERBOSITY_ALIASES = {
+    '关闭': 'warn',
+    '禁用': 'warn',
+    '启用': 'debug',
+    '2': 'warn',
+    '3': 'info',
+    '4': 'debug',
+}
 DEFAULT_LAUNCHER_CONFIG = {
     'language': 'CH',
     'theme': '深色',
@@ -161,7 +174,7 @@ LANG_TEXT = {
         'basic.path_group': '路径配置',
         'basic.model_group': '模型选择',
         'basic.exec_title': '程序路径',
-        'basic.exec_content': '设置 llama-server 在 WSL 中的可执行文件路径',
+        'basic.exec_content': '设置 llama-server 在 WSL 中的可执行文件路径；支持 {user} 占位符',
         'basic.search_title': '模型搜索路径',
         'basic.search_content': '用分号分隔多个 WSL 目录；支持 {user} 占位符',
         'basic.refresh_title': '刷新本地模型',
@@ -246,7 +259,7 @@ LANG_TEXT = {
         'server.timeout_title': '超时时间',
         'server.timeout_content': '服务器超时，单位秒（默认 600）',
         'server.verbose_title': '详细输出',
-        'server.verbose_content': '启用详细日志输出，方便调试',
+        'server.verbose_content': '设置 llama-server 日志等级，默认 warn(2)，避免 --verbose 的性能问题',
         'server.metrics_title': '监控指标',
         'server.metrics_content': '启用 Prometheus 格式的性能监控端点',
         'server.webui_title': 'Web 界面',
@@ -282,7 +295,7 @@ LANG_TEXT = {
         'basic.path_group': 'Paths',
         'basic.model_group': 'Models',
         'basic.exec_title': 'Executable Path',
-        'basic.exec_content': 'Path to the llama-server executable inside WSL.',
+        'basic.exec_content': 'Path to the llama-server executable inside WSL. Supports the {user} placeholder.',
         'basic.search_title': 'Model Search Paths',
         'basic.search_content': 'Separate multiple WSL directories with semicolons. Supports the {user} placeholder.',
         'basic.refresh_title': 'Refresh Local Models',
@@ -366,8 +379,8 @@ LANG_TEXT = {
         'server.parallel_content': 'Maximum concurrent server slots. -1 means auto (default -1).',
         'server.timeout_title': 'Timeout',
         'server.timeout_content': 'Server timeout in seconds (default 600).',
-        'server.verbose_title': 'Verbose Logs',
-        'server.verbose_content': 'Enable verbose logs for debugging.',
+        'server.verbose_title': 'Log Level',
+        'server.verbose_content': 'Set llama-server log level. Default: warn(2), avoiding --verbose overhead.',
         'server.metrics_title': 'Metrics',
         'server.metrics_content': 'Enable Prometheus-style performance metrics.',
         'server.webui_title': 'Web UI',
@@ -511,7 +524,7 @@ class BasicInterface(QFrame):
 
         # ─────────── 路径配置 ───────────
         self.pathGroup = SettingCardGroup('路径配置', self)
-        self.execPathCard = SettingCard(FIF.COMMAND_PROMPT, '程序路径', '设置 llama-server 在 WSL 中的可执行文件路径', self.pathGroup)
+        self.execPathCard = SettingCard(FIF.COMMAND_PROMPT, '程序路径', '设置 llama-server 在 WSL 中的可执行文件路径；支持 {user} 占位符', self.pathGroup)
         self.execPathEdit = LineEdit(self.execPathCard)
         self.execPathEdit.setPlaceholderText('~/llama-cpp-turboquant/build/bin/llama-server')
         self.execPathEdit.setText('~/llama-cpp-turboquant/build/bin/llama-server')
@@ -893,10 +906,11 @@ class ServerInterface(BaseSettingInterface):
         # ─────────── 功能开关 ───────────
         self.toggleGroup = SettingCardGroup('功能开关', self.scrollWidget)
 
-        # 详细输出 (--verbose)
-        self.verboseCard = SettingCard(FIF.VIEW, '详细输出', '启用详细日志输出，方便调试', self.toggleGroup)
+        # 详细输出 (--log-verbosity)
+        self.verboseCard = SettingCard(FIF.VIEW, '详细输出', '设置 llama-server 日志等级，默认 warn(2)，避免 --verbose 的性能问题', self.toggleGroup)
         self.verboseCombo = FixedComboBox(self.verboseCard)
-        self.verboseCombo.addItems(['关闭', '启用'])
+        self.verboseCombo.addItems(['warn', 'info', 'debug'])
+        self.verboseCombo.setCurrentText('warn')
         self.verboseCombo.setFixedWidth(CTRL_WIDTH)
         self.verboseCard.hBoxLayout.addWidget(self.verboseCombo, 0, Qt.AlignRight)
         self.verboseCard.hBoxLayout.addSpacing(16)
@@ -1907,7 +1921,7 @@ class MainWindow(MSFluentWindow):
         bi = self.basicInterface
         mi = self.modelInterface
         si = self.serverInterface
-        parts = ['wsl', bi.execPathEdit.text().strip()]
+        parts = ['wsl', self._expandedExecPath()]
 
         # 模型选择（用实际路径替换显示名）
         llm = bi.llmCombo.currentText()
@@ -1978,8 +1992,7 @@ class MainWindow(MSFluentWindow):
         parts.extend(['--timeout', str(si.timeoutSpin.value())])
 
         # 服务器 - 功能开关
-        if si.verboseCombo.currentText() == '启用':
-            parts.append('--verbose')
+        parts.extend(['--log-verbosity', LOG_VERBOSITY_LEVELS.get(self._normalizedLogVerbosity(), '2')])
         if si.metricsCombo.currentText() == '启用':
             parts.append('--metrics')
         if si.webuiCombo.currentText() == '禁用':
@@ -2045,6 +2058,12 @@ class MainWindow(MSFluentWindow):
     def _onRunBtnClicked(self):
         self.switchTo(self.logInterface)
         self._onLaunch()
+
+    def _normalizedLogVerbosity(self, value=None):
+        raw = self.serverInterface.verboseCombo.currentText() if value is None else value
+        key = str(raw or '').strip()
+        key = LEGACY_LOG_VERBOSITY_ALIASES.get(key, key.lower())
+        return key if key in LOG_VERBOSITY_LEVELS else 'warn'
 
     # ─────────── 启动器设置 ───────────
 
@@ -2395,6 +2414,9 @@ class MainWindow(MSFluentWindow):
         return parts or list(DEFAULT_MODEL_SEARCH_PATHS)
 
     def _detectWslUser(self):
+        cached = getattr(self, '_cachedWslUser', None)
+        if cached:
+            return cached
         try:
             result = subprocess.run(
                 ['wsl', '-d', DISTRO, '--', 'sh', '-lc', 'id -un 2>/dev/null || printf llama'],
@@ -2403,17 +2425,27 @@ class MainWindow(MSFluentWindow):
                 timeout=10,
             )
             user = decodeProcessOutput(result.stdout).replace('\x00', '').strip()
-            return user or 'llama'
+            self._cachedWslUser = user or 'llama'
+            return self._cachedWslUser
         except Exception:
+            self._cachedWslUser = 'llama'
             return 'llama'
+
+    def _expandWslPath(self, path, user=None):
+        user = user or self._detectWslUser()
+        p = (path or '').replace('<用户>', user).replace('{user}', user).replace('$USER', user).strip()
+        if p == '~' or p.startswith('~/'):
+            p = f"/home/{user}{p[1:]}"
+        return p
+
+    def _expandedExecPath(self):
+        return self._expandWslPath(self.basicInterface.execPathEdit.text())
 
     def _expandedModelSearchPaths(self):
         user = self._detectWslUser()
         paths = []
         for path in self._modelSearchPaths():
-            p = path.replace('<用户>', user).replace('{user}', user).replace('$USER', user).strip()
-            if p == '~' or p.startswith('~/'):
-                p = f"/home/{user}{p[1:]}"
+            p = self._expandWslPath(path, user)
             if p and p not in paths:
                 paths.append(p)
         return paths
@@ -2571,7 +2603,7 @@ done
             'ubatch_size': si.ubatchSpin.value(),
             'parallel': si.parallelSpin.value(),
             'timeout': si.timeoutSpin.value(),
-            'verbose': si.verboseCombo.currentText(),
+            'log_verbosity': self._normalizedLogVerbosity(),
             'metrics': si.metricsCombo.currentText(),
             'webui': si.webuiCombo.currentText(),
             'models': {
@@ -2647,7 +2679,7 @@ done
         si.ubatchSpin.setValue(cfg.get('ubatch_size', si.ubatchSpin.value()))
         si.parallelSpin.setValue(cfg.get('parallel', si.parallelSpin.value()))
         si.timeoutSpin.setValue(cfg.get('timeout', si.timeoutSpin.value()))
-        si.verboseCombo.setCurrentText(cfg.get('verbose', si.verboseCombo.currentText()))
+        si.verboseCombo.setCurrentText(self._normalizedLogVerbosity(cfg.get('log_verbosity', cfg.get('verbose', si.verboseCombo.currentText()))))
         si.metricsCombo.setCurrentText(cfg.get('metrics', si.metricsCombo.currentText()))
         si.webuiCombo.setCurrentText(cfg.get('webui', si.webuiCombo.currentText()))
 
@@ -2714,7 +2746,7 @@ done
         if result.get('api_key'):
             si.apiKeyEdit.setText(result.get('api_key'))
         si.metricsCombo.setCurrentText('启用')
-        si.verboseCombo.setCurrentText('启用')
+        si.verboseCombo.setCurrentText('warn')
 
         self._updateCommandPreview()
         self._saveConfig()
