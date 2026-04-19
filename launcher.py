@@ -945,7 +945,7 @@ class TerminalWorker(QThread):
     dataReady = Signal(str)
     processFinished = Signal(int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, decode_mode='auto'):
         super().__init__(parent)
         self._command = ''
         self._env = None
@@ -953,11 +953,14 @@ class TerminalWorker(QThread):
         self._cwd = None
         self._decoder = None
         self._decoder_name = None
+        self._decode_mode = decode_mode
 
-    def start_process(self, command, env=None, cwd=None):
+    def start_process(self, command, env=None, cwd=None, decode_mode=None):
         self._command = command
         self._env = env
         self._cwd = cwd
+        if decode_mode:
+            self._decode_mode = decode_mode
         self._decoder = None
         self._decoder_name = None
         self.start()
@@ -966,14 +969,22 @@ class TerminalWorker(QThread):
         if not raw:
             return ''
         if self._decoder is None:
-            if raw.startswith(b'\xff\xfe') or raw.count(b'\x00') > max(2, len(raw) // 8):
-                self._decoder_name = 'utf-16-le'
-            else:
+            if self._decode_mode == 'utf8':
                 self._decoder_name = 'utf-8'
-            self._decoder = codecs.getincrementaldecoder(self._decoder_name)(errors='strict')
+                self._decoder = codecs.getincrementaldecoder(self._decoder_name)(errors='replace')
+            else:
+                if raw.startswith(b'\xff\xfe') or raw.count(b'\x00') > max(2, len(raw) // 8):
+                    self._decoder_name = 'utf-16-le'
+                else:
+                    self._decoder_name = 'utf-8'
+                self._decoder = codecs.getincrementaldecoder(self._decoder_name)(errors='strict')
         try:
             return self._decoder.decode(raw)
         except UnicodeDecodeError:
+            if self._decode_mode == 'utf8':
+                self._decoder_name = 'utf-8'
+                self._decoder = codecs.getincrementaldecoder(self._decoder_name)(errors='replace')
+                return self._decoder.decode(raw)
             self._decoder_name = 'gb18030'
             self._decoder = codecs.getincrementaldecoder(self._decoder_name)(errors='replace')
             return self._decoder.decode(raw)
@@ -1224,7 +1235,7 @@ class LogInterface(QWidget):
         self.logText.clear()
         self._logBuffer.clear()
         self._logBufferChars = 0
-        self.worker = TerminalWorker(self)
+        self.worker = TerminalWorker(self, decode_mode='utf8')
         self.worker.dataReady.connect(self._appendOutput)
         self.worker.processFinished.connect(self._onProcessFinished)
         self.logText.worker = self.worker
