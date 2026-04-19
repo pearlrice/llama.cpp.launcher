@@ -6,6 +6,7 @@ import json
 import codecs
 import subprocess
 import time
+import urllib.request
 
 
 def _launcher_base_dir():
@@ -267,6 +268,8 @@ LANG_TEXT = {
         'log.launch': '启动',
         'log.stop': '停止',
         'log.clear': '清空',
+        'log.prefill_speed': 'Prefill',
+        'log.decode_speed': 'Decode',
     },
     'EN': {
         'nav.basic': 'Basics',
@@ -388,6 +391,8 @@ LANG_TEXT = {
         'log.launch': 'Launch',
         'log.stop': 'Stop',
         'log.clear': 'Clear',
+        'log.prefill_speed': 'Prefill',
+        'log.decode_speed': 'Decode',
     },
 }
 
@@ -938,6 +943,21 @@ class ServerInterface(BaseSettingInterface):
 
 
 _ANSI_RE = re.compile(r'\x1b\[[\?>=]*[0-9;]*[a-zA-Z~@`]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\([A-Z]|\x1b[=>]')
+_JSON_PREFILL_SPEED_RE = re.compile(r'"prompt_per_second"\s*:\s*([0-9]+(?:\.[0-9]+)?)')
+_JSON_DECODE_SPEED_RE = re.compile(r'"predicted_per_second"\s*:\s*([0-9]+(?:\.[0-9]+)?)')
+_TEXT_PREFILL_SPEED_RE = re.compile(
+    r'(?im)^\s*prompt eval time\s*=.*?\(\s*[0-9.]+\s*ms per token,\s*([0-9]+(?:\.[0-9]+)?)\s*tokens per second\s*\)'
+)
+_TEXT_DECODE_SPEED_RE = re.compile(
+    r'(?im)^\s*(?:eval time|generation eval time)\s*=.*?\(\s*[0-9.]+\s*ms per token,\s*([0-9]+(?:\.[0-9]+)?)\s*tokens per second\s*\)'
+)
+_PROMPT_PROGRESS_RE = re.compile(
+    r'"prompt_progress"\s*:\s*\{[^}]*"processed"\s*:\s*(\d+)[^}]*"total"\s*:\s*(\d+)[^}]*"cache"\s*:\s*(\d+)[^}]*"time_ms"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
+)
+_NEW_PROMPT_RE = re.compile(r'new prompt,\s*n_ctx_slot\s*=\s*\d+,\s*n_keep\s*=\s*\d+,\s*n_prompt_tokens\s*=\s*(\d+)')
+_SERVER_IDLE_RE = re.compile(r'all slots are idle', re.IGNORECASE)
+_SPEED_LABEL_IDLE_STYLE = 'font: 15px "Consolas", "Microsoft YaHei"; color: rgba(255,255,255,0.70); background: transparent;'
+_SPEED_LABEL_ACTIVE_STYLE = 'font: 15px "Consolas", "Microsoft YaHei"; color: rgba(160,255,190,0.92); background: transparent;'
 
 
 class TerminalWorker(QThread):
@@ -1133,6 +1153,18 @@ class LogInterface(QWidget):
         self._logTimer = QTimer(self)
         self._logTimer.setInterval(TERMINAL_FLUSH_INTERVAL_MS)
         self._logTimer.timeout.connect(self._flushLogBuffer)
+        self._serverHost = '127.0.0.1'
+        self._serverPort = 8080
+        self._serverApiKey = ''
+        self._metricsEnabled = False
+        self._speedParseBuffer = ''
+        self._lastSlotsTime = None
+        self._lastDecodedTotal = None
+        self._prefillSpeedTitle = 'Prefill'
+        self._decodeSpeedTitle = 'Decode'
+        self._prefillSpeedText = '--'
+        self._decodeSpeedText = '--'
+        self._speedLabelActive = False
 
         mainLayout = QVBoxLayout(self)
         mainLayout.setContentsMargins(36, 20, 36, 20)
@@ -1144,9 +1176,18 @@ class LogInterface(QWidget):
         self.titleLabel.setStyleSheet('font: 33px "Segoe UI", "Microsoft YaHei"; color: white; background: transparent;')
         titleLayout.addWidget(self.titleLabel)
         titleLayout.addStretch(1)
+        statsLayout = QVBoxLayout()
+        statsLayout.setContentsMargins(0, 0, 0, 0)
+        statsLayout.setSpacing(2)
         self.gpuMemLabel = QLabel('Llama: --G | Total: --/--G', self)
         self.gpuMemLabel.setStyleSheet('font: 20px "Consolas", "Microsoft YaHei"; color: rgba(255,255,255,0.85); background: transparent;')
-        titleLayout.addWidget(self.gpuMemLabel, 0, Qt.AlignVCenter | Qt.AlignRight)
+        self.gpuMemLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        statsLayout.addWidget(self.gpuMemLabel, 0, Qt.AlignRight)
+        self.tokenSpeedLabel = QLabel(self._speedLabelText(), self)
+        self.tokenSpeedLabel.setStyleSheet(_SPEED_LABEL_IDLE_STYLE)
+        self.tokenSpeedLabel.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        statsLayout.addWidget(self.tokenSpeedLabel, 0, Qt.AlignRight)
+        titleLayout.addLayout(statsLayout)
         mainLayout.addLayout(titleLayout)
 
         self.logText = TerminalTextEdit(self)
@@ -1173,9 +1214,217 @@ class LogInterface(QWidget):
         self.gpuMemTimer.timeout.connect(self._updateGpuMemLabel)
         self.gpuMemTimer.start()
         self._updateGpuMemLabel()
+        self.tokenSpeedTimer = QTimer(self)
+        self.tokenSpeedTimer.setInterval(500)
+        self.tokenSpeedTimer.timeout.connect(self._updateTokenSpeedFromMetrics)
 
     def _formatGpuValue(self, value):
         return f'{value:.1f}'.rstrip('0').rstrip('.')
+
+    def setSpeedTitles(self, prefill_title, decode_title):
+        self._prefillSpeedTitle = prefill_title or 'Prefill'
+        self._decodeSpeedTitle = decode_title or 'Decode'
+        self.tokenSpeedLabel.setText(self._speedLabelText())
+
+    def _speedLabelText(self):
+        return (
+            f'{self._prefillSpeedTitle}: {self._prefillSpeedText} token/s'
+            f' | {self._decodeSpeedTitle}: {self._decodeSpeedText} token/s'
+        )
+
+    def _setSpeedLabelActive(self, active):
+        if self._speedLabelActive == active:
+            return
+        self._speedLabelActive = active
+        self.tokenSpeedLabel.setStyleSheet(_SPEED_LABEL_ACTIVE_STYLE if active else _SPEED_LABEL_IDLE_STYLE)
+
+    def setServerEndpoint(self, host, port, metrics_enabled=False, api_key=''):
+        host = (host or '127.0.0.1').strip()
+        if host in ('0.0.0.0', '::', '*'):
+            host = '127.0.0.1'
+        self._serverHost = host
+        try:
+            self._serverPort = int(port)
+        except Exception:
+            self._serverPort = 8080
+        self._metricsEnabled = bool(metrics_enabled)
+        self._serverApiKey = (api_key or '').strip()
+
+    def _resetTokenSpeed(self):
+        self._speedParseBuffer = ''
+        self._resetRealtimeSpeedState()
+        self._prefillSpeedText = '--'
+        self._decodeSpeedText = '--'
+        self.tokenSpeedLabel.setText(self._speedLabelText())
+        self._setSpeedLabelActive(False)
+
+    def _resetRealtimeSpeedState(self):
+        self._lastSlotsTime = None
+        self._lastDecodedTotal = None
+
+    def _formatTokenSpeed(self, value):
+        try:
+            value = float(value)
+        except Exception:
+            return '--'
+        if value < 0:
+            return '--'
+        return f'{value:.1f}'.rstrip('0').rstrip('.')
+
+    def _setTokenSpeeds(self, prefill=None, decode=None, reset_missing=False):
+        prefill_text = self._formatTokenSpeed(prefill)
+        decode_text = self._formatTokenSpeed(decode)
+        changed = False
+        if reset_missing or prefill is not None:
+            self._prefillSpeedText = prefill_text
+            changed = True
+        if reset_missing or decode is not None:
+            self._decodeSpeedText = decode_text
+            changed = True
+        if changed:
+            self.tokenSpeedLabel.setText(self._speedLabelText())
+            self._setSpeedLabelActive(prefill_text != '--' or decode_text != '--')
+
+    def _markTokenSpeedIdle(self):
+        self._resetRealtimeSpeedState()
+        self._setSpeedLabelActive(False)
+
+    def _extractTokenSpeedFromText(self, text):
+        self._speedParseBuffer = (self._speedParseBuffer + text)[-4000:]
+        prefill = None
+        decode = None
+        for match in _NEW_PROMPT_RE.finditer(self._speedParseBuffer):
+            self._resetRealtimeSpeedState()
+        for match in _PROMPT_PROGRESS_RE.finditer(self._speedParseBuffer):
+            processed = int(match.group(1))
+            cache = int(match.group(3))
+            time_ms = float(match.group(4))
+            actual_processed = max(0, processed - cache)
+            if actual_processed > 0 and time_ms > 0:
+                prefill = actual_processed / (time_ms / 1000.0)
+        for match in _JSON_PREFILL_SPEED_RE.finditer(self._speedParseBuffer):
+            prefill = match.group(1)
+        for match in _JSON_DECODE_SPEED_RE.finditer(self._speedParseBuffer):
+            decode = match.group(1)
+        for match in _TEXT_PREFILL_SPEED_RE.finditer(self._speedParseBuffer):
+            prefill = match.group(1)
+        for match in _TEXT_DECODE_SPEED_RE.finditer(self._speedParseBuffer):
+            decode = match.group(1)
+        if prefill is not None or decode is not None:
+            self._setTokenSpeeds(prefill=prefill, decode=decode)
+        if _SERVER_IDLE_RE.search(self._speedParseBuffer):
+            self._markTokenSpeedIdle()
+        last_newline = self._speedParseBuffer.rfind('\n')
+        if last_newline >= 0:
+            self._speedParseBuffer = self._speedParseBuffer[last_newline + 1:]
+
+    def _metricsUrl(self):
+        host = self._serverHost
+        if ':' in host and not host.startswith('['):
+            host = f'[{host}]'
+        return f'http://{host}:{self._serverPort}/metrics'
+
+    def _slotsUrl(self):
+        host = self._serverHost
+        if ':' in host and not host.startswith('['):
+            host = f'[{host}]'
+        return f'http://{host}:{self._serverPort}/slots'
+
+    def _parseMetrics(self, body):
+        metrics = {}
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name = parts[0].split('{', 1)[0]
+            try:
+                metrics[name] = float(parts[1])
+            except ValueError:
+                continue
+        return metrics
+
+    def _queryMetrics(self):
+        req = urllib.request.Request(self._metricsUrl())
+        if self._serverApiKey:
+            req.add_header('Authorization', f'Bearer {self._serverApiKey}')
+        with urllib.request.urlopen(req, timeout=0.35) as response:
+            return response.read(65536).decode('utf-8', errors='replace')
+
+    def _querySlots(self):
+        req = urllib.request.Request(self._slotsUrl())
+        if self._serverApiKey:
+            req.add_header('Authorization', f'Bearer {self._serverApiKey}')
+        with urllib.request.urlopen(req, timeout=0.35) as response:
+            return json.loads(response.read(262144).decode('utf-8', errors='replace'))
+
+    def _slotDecodedCount(self, slot):
+        next_token = slot.get('next_token')
+        if isinstance(next_token, list):
+            next_token = next_token[0] if next_token else None
+        if not isinstance(next_token, dict):
+            return None
+        try:
+            return int(next_token.get('n_decoded') or 0)
+        except Exception:
+            return None
+
+    def _updateTokenSpeedFromMetrics(self):
+        if not (self.worker and self.worker.isRunning()):
+            self._markTokenSpeedIdle()
+            self.tokenSpeedTimer.stop()
+            return
+        processing = False
+        prefill = None
+        decode = None
+        now = time.monotonic()
+        try:
+            slots = self._querySlots()
+            if isinstance(slots, list):
+                processing = any(bool(slot.get('is_processing')) for slot in slots if isinstance(slot, dict))
+                decoded_total = None
+                for slot in slots:
+                    if not isinstance(slot, dict):
+                        continue
+                    slot_decoded = self._slotDecodedCount(slot)
+                    if slot_decoded is None:
+                        continue
+                    decoded_total = slot_decoded if decoded_total is None else decoded_total + slot_decoded
+                if processing and self._lastSlotsTime is not None and self._lastDecodedTotal is not None:
+                    elapsed = now - self._lastSlotsTime
+                    delta_decoded = (decoded_total or 0) - self._lastDecodedTotal
+                    if elapsed > 0 and delta_decoded > 0:
+                        decode = delta_decoded / elapsed
+                    elif delta_decoded < 0:
+                        self._resetRealtimeSpeedState()
+                if processing and decoded_total is not None:
+                    self._lastSlotsTime = now
+                    self._lastDecodedTotal = decoded_total
+        except Exception:
+            pass
+
+        if self._metricsEnabled:
+            try:
+                metrics = self._parseMetrics(self._queryMetrics())
+                processing = processing or metrics.get('llamacpp:requests_processing', 0.0) > 0
+                prompt_average = metrics.get('llamacpp:prompt_tokens_seconds')
+                decode_average = metrics.get('llamacpp:predicted_tokens_seconds')
+                if processing:
+                    if prompt_average and prompt_average > 0:
+                        prefill = prompt_average
+                    if decode is None and decode_average and decode_average > 0:
+                        decode = decode_average
+            except Exception:
+                pass
+
+        if processing:
+            if prefill is not None or decode is not None:
+                self._setTokenSpeeds(prefill=prefill, decode=decode)
+            return
+
+        self._markTokenSpeedIdle()
 
     def _queryGpuMemory(self):
         startupinfo = subprocess.STARTUPINFO()
@@ -1235,6 +1484,7 @@ class LogInterface(QWidget):
         self.logText.clear()
         self._logBuffer.clear()
         self._logBufferChars = 0
+        self._resetTokenSpeed()
         self.worker = TerminalWorker(self, decode_mode='utf8')
         self.worker.dataReady.connect(self._appendOutput)
         self.worker.processFinished.connect(self._onProcessFinished)
@@ -1243,6 +1493,7 @@ class LogInterface(QWidget):
         self._gpuLaunchBaselineUsedG = gpu_mem[0] if gpu_mem else None
         self.worker.start_process(command)
         self._logTimer.start()
+        self.tokenSpeedTimer.start()
         self.launchBtn.setEnabled(False)
         self.stopBtn.setEnabled(True)
         self.logText.setFocus()
@@ -1255,6 +1506,7 @@ class LogInterface(QWidget):
         text = re.sub(r'\n{2,}', '\n', text)
         if not text:
             return
+        self._extractTokenSpeedFromText(text)
         self._logBuffer.append(text)
         self._logBufferChars += len(text)
         if self._logBufferChars > TERMINAL_BUFFER_CHAR_LIMIT:
@@ -1291,12 +1543,16 @@ class LogInterface(QWidget):
         self.stopBtn.setEnabled(False)
         self.logText.worker = None
         self._gpuLaunchBaselineUsedG = None
+        self.tokenSpeedTimer.stop()
+        self._resetTokenSpeed()
 
     def stopProcess(self):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.launchBtn.setEnabled(True)
             self.stopBtn.setEnabled(False)
+            self.tokenSpeedTimer.stop()
+            self._resetTokenSpeed()
 
 
 class DeployInterface(QFrame):
@@ -2064,6 +2320,12 @@ class MainWindow(MSFluentWindow):
     def _onLaunch(self):
         self._updateCommandPreview()
         cmd = self.buildCommand()
+        self.logInterface.setServerEndpoint(
+            self.serverInterface.hostEdit.text(),
+            self.serverInterface.portSpin.value(),
+            self.serverInterface.metricsCombo.currentText() == '启用',
+            self.serverInterface.apiKeyEdit.text(),
+        )
         self.logInterface.launchCommand(cmd)
 
     def _onRunBtnClicked(self):
@@ -2221,6 +2483,7 @@ class MainWindow(MSFluentWindow):
         li.launchBtn.setText(text['log.launch'])
         li.stopBtn.setText(text['log.stop'])
         li.clearBtn.setText(text['log.clear'])
+        li.setSpeedTitles(text['log.prefill_speed'], text['log.decode_speed'])
 
         for key, button in getattr(self, 'navButtons', {}).items():
             label = text.get(f'nav.{key}')
