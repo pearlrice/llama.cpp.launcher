@@ -36,6 +36,7 @@
   "log_verbosity": "warn",
   "metrics": "关闭",
   "webui": "启用",
+  "distro": "Ubuntu-24.04",
   "models": {
     "llm": {},
     "mm": {}

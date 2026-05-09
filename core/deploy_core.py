@@ -34,7 +34,8 @@ except Exception:
 # 配置常量
 # ═══════════════════════════════════════════════════════════════
 
-DISTRO = "Ubuntu-24.04"
+DEFAULT_DISTRO = "Ubuntu-24.04"
+DISTRO = os.environ.get("AUTODEPLOY_DISTRO", DEFAULT_DISTRO).strip() or DEFAULT_DISTRO
 SCRIPT_DIR = os.environ.get("AUTODEPLOY_BASE_DIR") or os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(SCRIPT_DIR, "deploy_state.json")
 CRED_BACKUP = os.path.join(SCRIPT_DIR, "ubuntu_credentials.txt")
@@ -75,6 +76,11 @@ API_KEY = "sk-your-key"
 # 代理 (宿主机 Clash 等代理，WSL2 通过宿主机 IP 访问)
 PROXY_PORT = 7890
 
+
+def _env_enabled(value):
+    return str(value).strip().lower() not in ('', '0', 'false', 'no', 'off')
+
+
 # 非交互模式 (GUI 启动器集成: 通过环境变量传入参数，跳过所有终端交互)
 _ENV_PASSWORD = os.environ.get('AUTODEPLOY_PASSWORD', '')
 _ENV_USERNAME = os.environ.get('AUTODEPLOY_USERNAME', '')
@@ -85,10 +91,7 @@ _ENV_NO_START_SERVER = bool(os.environ.get('AUTODEPLOY_NO_START_SERVER', ''))
 _ENV_JSON_EVENTS = bool(os.environ.get('AUTODEPLOY_JSON_EVENTS', ''))
 _ENV_RESULT_FILE = os.environ.get('AUTODEPLOY_RESULT_FILE', os.path.join(SCRIPT_DIR, 'deploy_result.json'))
 _ENV_MODEL_PRESET = os.environ.get('AUTODEPLOY_MODEL_PRESET', DEFAULT_MODEL_PRESET_KEY)
-
-
-def _env_enabled(value):
-    return str(value).strip().lower() not in ('', '0', 'false', 'no', 'off')
+_ENV_USE_EXISTING_WSL = _env_enabled(os.environ.get('AUTODEPLOY_USE_EXISTING_WSL', ''))
 
 
 def emit_event(phase, step, status, message, **extra):
@@ -114,6 +117,8 @@ def parse_args(argv=None):
     parser.add_argument('--username', help='WSL user name to create or reuse.')
     parser.add_argument('--password', help='WSL user password for sudo and new-user creation.')
     parser.add_argument('--install-dir', help='Windows directory used for Ubuntu-24.04 import.')
+    parser.add_argument('--distro', help='WSL distribution name to create or reuse.')
+    parser.add_argument('--use-existing-wsl', action='store_true', help='Reuse an existing Ubuntu WSL distribution instead of installing Ubuntu-24.04.')
     parser.add_argument('--wsl-mirror', help='Local Ubuntu .wsl image path.')
     parser.add_argument('--no-start-server', action='store_true', help='Prepare llama.cpp and models but do not start llama-server.')
     parser.add_argument('--model-preset', choices=sorted(MODEL_PRESETS.keys()), help='Model preset to download.')
@@ -123,8 +128,9 @@ def parse_args(argv=None):
 
 
 def apply_args(args):
-    global _ENV_PASSWORD, _ENV_USERNAME, _ENV_INSTALL_DIR, _ENV_NON_INTERACTIVE
+    global DISTRO, _ENV_PASSWORD, _ENV_USERNAME, _ENV_INSTALL_DIR, _ENV_NON_INTERACTIVE
     global _ENV_WSL_MIRROR, _ENV_NO_START_SERVER, _ENV_JSON_EVENTS, _ENV_RESULT_FILE, _ENV_MODEL_PRESET
+    global _ENV_USE_EXISTING_WSL
 
     if args.password:
         _ENV_PASSWORD = args.password
@@ -132,6 +138,8 @@ def apply_args(args):
         _ENV_USERNAME = args.username
     if args.install_dir:
         _ENV_INSTALL_DIR = args.install_dir
+    if args.distro:
+        DISTRO = args.distro.strip() or DISTRO
     if args.wsl_mirror:
         _ENV_WSL_MIRROR = args.wsl_mirror
     if args.result_file:
@@ -142,6 +150,9 @@ def apply_args(args):
     _ENV_NON_INTERACTIVE = _ENV_NON_INTERACTIVE or args.non_interactive
     _ENV_NO_START_SERVER = _ENV_NO_START_SERVER or args.no_start_server
     _ENV_JSON_EVENTS = _ENV_JSON_EVENTS or args.json_events
+    _ENV_USE_EXISTING_WSL = _ENV_USE_EXISTING_WSL or args.use_existing_wsl
+    if not _ENV_USE_EXISTING_WSL:
+        DISTRO = DEFAULT_DISTRO
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -621,15 +632,8 @@ def _wsl2_active():
     ).returncode == 0
 
 
-def _distro_ready():
-    """Ubuntu-24.04 是否已安装且可运行 — 在其中 echo 验证"""
-    return subprocess.run(
-        f"wsl -d {DISTRO} -- echo OK", shell=True, capture_output=True,
-    ).returncode == 0
-
-
-def _distro_registered():
-    """目标发行版是否已经注册。注册存在时绝不能再次 wsl --import。"""
+def _list_wsl_distros():
+    """Return registered WSL distro names, normalized from wsl.exe output."""
     result = subprocess.run(
         "wsl --list --quiet",
         shell=True,
@@ -640,9 +644,64 @@ def _distro_registered():
     names = []
     for line in text.splitlines():
         name = line.replace("\x00", "").strip().lstrip("*").strip()
-        if name:
+        if name and name not in names:
             names.append(name)
-    return DISTRO in names
+    return names
+
+
+def _distro_echo_ok(name):
+    try:
+        return subprocess.run(
+            ["wsl", "-d", name, "--", "echo", "OK"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        ).returncode == 0
+    except Exception:
+        return False
+
+
+def _ubuntu_distro_candidates(names):
+    ubuntu_names = [name for name in names if name.lower().startswith("ubuntu")]
+    preferred = [DISTRO, "Ubuntu", DEFAULT_DISTRO]
+    candidates = []
+    for name in preferred + ubuntu_names:
+        if name in ubuntu_names and name not in candidates:
+            candidates.append(name)
+    return candidates
+
+
+def _reuse_existing_ubuntu_distro():
+    """Prefer an already installed Ubuntu distro before downloading/importing one."""
+    global DISTRO
+    names = _list_wsl_distros()
+    candidates = _ubuntu_distro_candidates(names)
+    if not candidates:
+        return False
+
+    for name in candidates:
+        if _distro_echo_ok(name):
+            if name != DISTRO:
+                print(f"[+] 发现可用的现有 WSL Ubuntu 发行版: {name}，本次部署将复用它。")
+                DISTRO = name
+            return True
+
+    if DISTRO not in names:
+        name = candidates[0]
+        print(f"[+] 发现已注册的 WSL Ubuntu 发行版: {name}，先按已有发行版继续。")
+        DISTRO = name
+        return True
+    return False
+
+
+def _distro_ready():
+    """Ubuntu-24.04 是否已安装且可运行 — 在其中 echo 验证"""
+    return _distro_echo_ok(DISTRO)
+
+
+def _distro_registered():
+    """目标发行版是否已经注册。注册存在时绝不能再次 wsl --import。"""
+    return DISTRO in _list_wsl_distros()
 
 
 def _feature_enabled(name):
@@ -934,6 +993,16 @@ def _selected_model_preset():
 def _model_paths(username):
     key, preset = _selected_model_preset()
     home = f"/home/{username}"
+    if key == "none":
+        return {
+            'key': key,
+            'preset': preset,
+            'model_dir': "",
+            'llm_path': "",
+            'mm_path': "",
+            'llm_file': "",
+            'mm_file': "",
+        }
     model_dir = f"{home}/gguf_models/{preset['directory']}"
     llm_file = preset['artifacts']['llm']['filename']
     mm_file = preset['artifacts']['mm']['filename']
@@ -1042,6 +1111,13 @@ def phase_1():
     # ── [1/3] 检查 WSL2 核心 + 目标分发版 ──
     print("\n[1/3] 检查 WSL 状态...")
     wsl_ok = _wsl2_active()
+    if _ENV_USE_EXISTING_WSL:
+        if not wsl_ok:
+            print("[!] 已选择部署到已有 WSL 分发，但当前 WSL 不可用。")
+            sys.exit(1)
+        if not _reuse_existing_ubuntu_distro():
+            print("[!] 已选择部署到已有 WSL 分发，但未找到可用的 Ubuntu/Ubuntu-* 分发。")
+            sys.exit(1)
     distro_registered = _distro_registered() if wsl_ok else False
     distro_ok = _distro_ready()
 
@@ -1119,6 +1195,22 @@ def _ask_password(username, verify=False, max_retry=3):
     """
     if _ENV_PASSWORD:
         print("[+] 使用预设密码")
+        if verify:
+            check_script = f"echo '{_ENV_PASSWORD}' | sudo -S -v 2>/dev/null && echo PWD_OK || echo PWD_FAIL"
+            check_bytes = check_script.encode("utf-8")
+            cmd = f"wsl -d {DISTRO} -u {username} -- bash -s"
+            try:
+                result = subprocess.run(
+                    cmd, shell=True, input=check_bytes,
+                    capture_output=True, timeout=10,
+                )
+                out = result.stdout.decode("utf-8", errors="replace")
+                if "PWD_OK" not in out:
+                    print("[!] 预设 WSL 密码验证失败。")
+                    sys.exit(1)
+            except Exception as e:
+                print(f"[!] WSL 密码验证异常: {e}")
+                sys.exit(1)
         return _ENV_PASSWORD
     for attempt in range(1, max_retry + 1):
         pwd = getpass.getpass(f"请输入 {username} 的密码 (第 {attempt}/{max_retry} 次): ")
@@ -1163,6 +1255,18 @@ def resolve_user():
     """
     existing = _detect_wsl_users()
     preferred = _ENV_USERNAME.strip()
+
+    if _ENV_USE_EXISTING_WSL:
+        if not preferred:
+            print("[!] 已选择部署到已有 WSL 分发，请提供已有 WSL 用户名。")
+            sys.exit(1)
+        if preferred not in existing:
+            print(f"[!] 已选择部署到已有 WSL 分发，但用户 {preferred} 不存在。")
+            print(f"    已检测到用户: {', '.join(existing) if existing else '<none>'}")
+            sys.exit(1)
+        print(f"\n[+] 使用已有 WSL 用户: {preferred}")
+        password = _ask_password(preferred, verify=True)
+        return preferred, password, False
 
     if preferred:
         if preferred in existing:
@@ -1622,8 +1726,13 @@ cmake --build build --config Release -j $(($(nproc)-2))
 
     # ── [3/4] 检查并下载模型 ──
     print("\n[3/4] 检查模型文件...")
-    out, _ = run_wsl(
-        f"""
+    if model_info['key'] == "none":
+        print("[+] 模型预设为“无”，跳过模型下载，并跳过自动启动推理服务。")
+        emit_event('model', 'download', 'skipped', '模型预设为“无”，跳过模型下载')
+        start_server = False
+    else:
+        out, _ = run_wsl(
+            f"""
 mkdir -p {shlex.quote(model_dir)}
 check_file() {{
     local file="$1"
@@ -1644,32 +1753,32 @@ echo "MODEL_$result"
 result=$(check_file {shlex.quote(mm_path)})
 echo "MMPROJ_$result"
 """,
-        user=username,
-        capture=True,
-    )
+            user=username,
+            capture=True,
+        )
 
-    model_ok = "MODEL_OK" in out
-    mmproj_ok = "MMPROJ_OK" in out
+        model_ok = "MODEL_OK" in out
+        mmproj_ok = "MMPROJ_OK" in out
 
-    if model_ok and mmproj_ok:
-        print(f"[+] 模型文件已存在 ({llm_file}, {mm_file})，跳过下载。")
-    else:
-        if not model_ok:
-            ok = _download_model_artifact(
-                username, model_dir, "大语言模型", llm_file, preset['artifacts']['llm']['sources']
-            )
-            if not ok:
-                print(f"[!] {llm_file} 所有下载源均失败。")
-                sys.exit(1)
-        if not mmproj_ok:
-            ok = _download_model_artifact(
-                username, model_dir, "多模态投影器", mm_file, preset['artifacts']['mm']['sources']
-            )
-            if not ok:
-                print(f"[!] {mm_file} 所有下载源均失败。")
-                sys.exit(1)
-        print("[+] 模型下载完成。")
-        run_wsl(f"ls -lh {shlex.quote(model_dir)}/*.gguf", user=username)
+        if model_ok and mmproj_ok:
+            print(f"[+] 模型文件已存在 ({llm_file}, {mm_file})，跳过下载。")
+        else:
+            if not model_ok:
+                ok = _download_model_artifact(
+                    username, model_dir, "大语言模型", llm_file, preset['artifacts']['llm']['sources']
+                )
+                if not ok:
+                    print(f"[!] {llm_file} 所有下载源均失败。")
+                    sys.exit(1)
+            if not mmproj_ok:
+                ok = _download_model_artifact(
+                    username, model_dir, "多模态投影器", mm_file, preset['artifacts']['mm']['sources']
+                )
+                if not ok:
+                    print(f"[!] {mm_file} 所有下载源均失败。")
+                    sys.exit(1)
+            print("[+] 模型下载完成。")
+            run_wsl(f"ls -lh {shlex.quote(model_dir)}/*.gguf", user=username)
 
     # ── [4/4] 启动 llama-server ──
     print("\n[4/4] 启动 llama-server...")
@@ -1729,6 +1838,14 @@ def write_deploy_result(username):
     home = f"/home/{username}"
     model_info = _model_paths(username)
     preset = model_info['preset']
+    model_search_path = [
+        f"{home}/model",
+        f"{home}/models",
+        f"{home}/gguf_models",
+        f"{home}/{REPO_DIR}",
+    ]
+    if model_info['model_dir']:
+        model_search_path.append(model_info['model_dir'])
     result = {
         'distro': DISTRO,
         'username': username,
@@ -1736,13 +1853,7 @@ def write_deploy_result(username):
         'exec_path': f"{home}/{REPO_DIR}/build/bin/llama-server",
         'model_preset': model_info['key'],
         'model_dir': model_info['model_dir'],
-        'model_search_path': [
-            f"{home}/model",
-            f"{home}/models",
-            f"{home}/gguf_models",
-            f"{home}/{REPO_DIR}",
-            model_info['model_dir'],
-        ],
+        'model_search_path': model_search_path,
         'llm_model_name': preset['llm_name'],
         'llm_model_path': model_info['llm_path'],
         'mm_model_name': preset['mm_name'],

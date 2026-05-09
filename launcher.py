@@ -6,7 +6,6 @@ import json
 import codecs
 import subprocess
 import time
-import urllib.request
 
 
 def _launcher_base_dir():
@@ -59,7 +58,7 @@ if '--run-autodeploy' in sys.argv:
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QIcon, QColor, QFont, QTextCursor
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPlainTextEdit, QLabel, QFrame,
-                               QFileDialog, QLineEdit, QGraphicsOpacityEffect, QMessageBox)
+                               QFileDialog, QLineEdit, QGraphicsOpacityEffect, QMessageBox, QCheckBox)
 
 if sys.platform == 'win32':
     try:
@@ -104,7 +103,8 @@ class DoubleClickPushButton(PushButton):
 
 
 CTRL_WIDTH = 200
-DISTRO = 'Ubuntu-24.04'
+DEFAULT_DISTRO = 'Ubuntu-24.04'
+DISTRO = DEFAULT_DISTRO
 DEFAULT_MODEL_SEARCH_PATHS = [
     '/home/{user}/model',
     '/home/{user}/models',
@@ -409,6 +409,7 @@ try:
 except Exception:
     DEFAULT_MODEL_PRESET_KEY = 'qwen3.5-27b'
     MODEL_PRESETS = {
+        'none': {'display_name': '无'},
         DEFAULT_MODEL_PRESET_KEY: {'display_name': 'Qwen3.5-27B UD-Q4_K_XL'},
     }
 
@@ -954,7 +955,6 @@ _TEXT_DECODE_SPEED_RE = re.compile(
 _PROMPT_PROGRESS_RE = re.compile(
     r'"prompt_progress"\s*:\s*\{[^}]*"processed"\s*:\s*(\d+)[^}]*"total"\s*:\s*(\d+)[^}]*"cache"\s*:\s*(\d+)[^}]*"time_ms"\s*:\s*([0-9]+(?:\.[0-9]+)?)'
 )
-_NEW_PROMPT_RE = re.compile(r'new prompt,\s*n_ctx_slot\s*=\s*\d+,\s*n_keep\s*=\s*\d+,\s*n_prompt_tokens\s*=\s*(\d+)')
 _SERVER_IDLE_RE = re.compile(r'all slots are idle', re.IGNORECASE)
 _SPEED_LABEL_IDLE_STYLE = 'font: 15px "Consolas", "Microsoft YaHei"; color: rgba(255,255,255,0.70); background: transparent;'
 _SPEED_LABEL_ACTIVE_STYLE = 'font: 15px "Consolas", "Microsoft YaHei"; color: rgba(160,255,190,0.92); background: transparent;'
@@ -1158,8 +1158,6 @@ class LogInterface(QWidget):
         self._serverApiKey = ''
         self._metricsEnabled = False
         self._speedParseBuffer = ''
-        self._lastSlotsTime = None
-        self._lastDecodedTotal = None
         self._prefillSpeedTitle = 'Prefill'
         self._decodeSpeedTitle = 'Decode'
         self._prefillSpeedText = '--'
@@ -1214,9 +1212,6 @@ class LogInterface(QWidget):
         self.gpuMemTimer.timeout.connect(self._updateGpuMemLabel)
         self.gpuMemTimer.start()
         self._updateGpuMemLabel()
-        self.tokenSpeedTimer = QTimer(self)
-        self.tokenSpeedTimer.setInterval(500)
-        self.tokenSpeedTimer.timeout.connect(self._updateTokenSpeedFromMetrics)
 
     def _formatGpuValue(self, value):
         return f'{value:.1f}'.rstrip('0').rstrip('.')
@@ -1252,15 +1247,10 @@ class LogInterface(QWidget):
 
     def _resetTokenSpeed(self):
         self._speedParseBuffer = ''
-        self._resetRealtimeSpeedState()
         self._prefillSpeedText = '--'
         self._decodeSpeedText = '--'
         self.tokenSpeedLabel.setText(self._speedLabelText())
         self._setSpeedLabelActive(False)
-
-    def _resetRealtimeSpeedState(self):
-        self._lastSlotsTime = None
-        self._lastDecodedTotal = None
 
     def _formatTokenSpeed(self, value):
         try:
@@ -1286,15 +1276,12 @@ class LogInterface(QWidget):
             self._setSpeedLabelActive(prefill_text != '--' or decode_text != '--')
 
     def _markTokenSpeedIdle(self):
-        self._resetRealtimeSpeedState()
         self._setSpeedLabelActive(False)
 
     def _extractTokenSpeedFromText(self, text):
         self._speedParseBuffer = (self._speedParseBuffer + text)[-4000:]
         prefill = None
         decode = None
-        for match in _NEW_PROMPT_RE.finditer(self._speedParseBuffer):
-            self._resetRealtimeSpeedState()
         for match in _PROMPT_PROGRESS_RE.finditer(self._speedParseBuffer):
             processed = int(match.group(1))
             cache = int(match.group(3))
@@ -1317,114 +1304,6 @@ class LogInterface(QWidget):
         last_newline = self._speedParseBuffer.rfind('\n')
         if last_newline >= 0:
             self._speedParseBuffer = self._speedParseBuffer[last_newline + 1:]
-
-    def _metricsUrl(self):
-        host = self._serverHost
-        if ':' in host and not host.startswith('['):
-            host = f'[{host}]'
-        return f'http://{host}:{self._serverPort}/metrics'
-
-    def _slotsUrl(self):
-        host = self._serverHost
-        if ':' in host and not host.startswith('['):
-            host = f'[{host}]'
-        return f'http://{host}:{self._serverPort}/slots'
-
-    def _parseMetrics(self, body):
-        metrics = {}
-        for line in body.splitlines():
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-            name = parts[0].split('{', 1)[0]
-            try:
-                metrics[name] = float(parts[1])
-            except ValueError:
-                continue
-        return metrics
-
-    def _queryMetrics(self):
-        req = urllib.request.Request(self._metricsUrl())
-        if self._serverApiKey:
-            req.add_header('Authorization', f'Bearer {self._serverApiKey}')
-        with urllib.request.urlopen(req, timeout=0.35) as response:
-            return response.read(65536).decode('utf-8', errors='replace')
-
-    def _querySlots(self):
-        req = urllib.request.Request(self._slotsUrl())
-        if self._serverApiKey:
-            req.add_header('Authorization', f'Bearer {self._serverApiKey}')
-        with urllib.request.urlopen(req, timeout=0.35) as response:
-            return json.loads(response.read(262144).decode('utf-8', errors='replace'))
-
-    def _slotDecodedCount(self, slot):
-        next_token = slot.get('next_token')
-        if isinstance(next_token, list):
-            next_token = next_token[0] if next_token else None
-        if not isinstance(next_token, dict):
-            return None
-        try:
-            return int(next_token.get('n_decoded') or 0)
-        except Exception:
-            return None
-
-    def _updateTokenSpeedFromMetrics(self):
-        if not (self.worker and self.worker.isRunning()):
-            self._markTokenSpeedIdle()
-            self.tokenSpeedTimer.stop()
-            return
-        processing = False
-        prefill = None
-        decode = None
-        now = time.monotonic()
-        try:
-            slots = self._querySlots()
-            if isinstance(slots, list):
-                processing = any(bool(slot.get('is_processing')) for slot in slots if isinstance(slot, dict))
-                decoded_total = None
-                for slot in slots:
-                    if not isinstance(slot, dict):
-                        continue
-                    slot_decoded = self._slotDecodedCount(slot)
-                    if slot_decoded is None:
-                        continue
-                    decoded_total = slot_decoded if decoded_total is None else decoded_total + slot_decoded
-                if processing and self._lastSlotsTime is not None and self._lastDecodedTotal is not None:
-                    elapsed = now - self._lastSlotsTime
-                    delta_decoded = (decoded_total or 0) - self._lastDecodedTotal
-                    if elapsed > 0 and delta_decoded > 0:
-                        decode = delta_decoded / elapsed
-                    elif delta_decoded < 0:
-                        self._resetRealtimeSpeedState()
-                if processing and decoded_total is not None:
-                    self._lastSlotsTime = now
-                    self._lastDecodedTotal = decoded_total
-        except Exception:
-            pass
-
-        if self._metricsEnabled:
-            try:
-                metrics = self._parseMetrics(self._queryMetrics())
-                processing = processing or metrics.get('llamacpp:requests_processing', 0.0) > 0
-                prompt_average = metrics.get('llamacpp:prompt_tokens_seconds')
-                decode_average = metrics.get('llamacpp:predicted_tokens_seconds')
-                if processing:
-                    if prompt_average and prompt_average > 0:
-                        prefill = prompt_average
-                    if decode is None and decode_average and decode_average > 0:
-                        decode = decode_average
-            except Exception:
-                pass
-
-        if processing:
-            if prefill is not None or decode is not None:
-                self._setTokenSpeeds(prefill=prefill, decode=decode)
-            return
-
-        self._markTokenSpeedIdle()
 
     def _queryGpuMemory(self):
         startupinfo = subprocess.STARTUPINFO()
@@ -1493,7 +1372,6 @@ class LogInterface(QWidget):
         self._gpuLaunchBaselineUsedG = gpu_mem[0] if gpu_mem else None
         self.worker.start_process(command)
         self._logTimer.start()
-        self.tokenSpeedTimer.start()
         self.launchBtn.setEnabled(False)
         self.stopBtn.setEnabled(True)
         self.logText.setFocus()
@@ -1543,7 +1421,6 @@ class LogInterface(QWidget):
         self.stopBtn.setEnabled(False)
         self.logText.worker = None
         self._gpuLaunchBaselineUsedG = None
-        self.tokenSpeedTimer.stop()
         self._resetTokenSpeed()
 
     def stopProcess(self):
@@ -1551,7 +1428,6 @@ class LogInterface(QWidget):
             self.worker.stop()
             self.launchBtn.setEnabled(True)
             self.stopBtn.setEnabled(False)
-            self.tokenSpeedTimer.stop()
             self._resetTokenSpeed()
 
 
@@ -1606,6 +1482,18 @@ class DeployInterface(QFrame):
 
         self.configGroup = SettingCardGroup('部署配置', self)
 
+        self.useExistingWslCard = SettingCard(
+            FIF.LINK, '部署到已有wsl分发内',
+            '勾选后复用本机已有 Ubuntu WSL 分发；不勾选时自动下载并安装 Ubuntu-24.04',
+            self.configGroup
+        )
+        self.useExistingWslCheck = QCheckBox(self.useExistingWslCard)
+        self.useExistingWslCheck.setFixedWidth(24)
+        self.useExistingWslCheck.toggled.connect(self._toggleExistingWslMode)
+        self.useExistingWslCard.hBoxLayout.addWidget(self.useExistingWslCheck, 0, Qt.AlignRight)
+        self.useExistingWslCard.hBoxLayout.addSpacing(16)
+        self.configGroup.addSettingCard(self.useExistingWslCard)
+
         self.usernameCard = SettingCard(
             FIF.EDIT, 'WSL 用户名',
             '不存在时会自动创建；已存在时会复用该用户',
@@ -1632,6 +1520,31 @@ class DeployInterface(QFrame):
         self.passwordCard.hBoxLayout.addWidget(self.passwordEdit, 0, Qt.AlignRight)
         self.passwordCard.hBoxLayout.addSpacing(16)
         self.configGroup.addSettingCard(self.passwordCard)
+
+        self.existingUsernameCard = SettingCard(
+            FIF.EDIT, '已有 WSL 用户名',
+            '请输入已有 Ubuntu WSL 分发里的普通用户，用于后续安装与编译',
+            self.configGroup
+        )
+        self.existingUsernameEdit = LineEdit(self.existingUsernameCard)
+        self.existingUsernameEdit.setPlaceholderText('例如: dao')
+        self.existingUsernameEdit.setFixedWidth(300)
+        self.existingUsernameCard.hBoxLayout.addWidget(self.existingUsernameEdit, 0, Qt.AlignRight)
+        self.existingUsernameCard.hBoxLayout.addSpacing(16)
+        self.configGroup.addSettingCard(self.existingUsernameCard)
+
+        self.existingPasswordCard = SettingCard(
+            FIF.COMMAND_PROMPT, '已有 WSL 密码',
+            '请输入该用户的 sudo 密码，用于安装 CUDA、依赖和编译环境',
+            self.configGroup
+        )
+        self.existingPasswordEdit = LineEdit(self.existingPasswordCard)
+        self.existingPasswordEdit.setPlaceholderText('请输入已有 WSL 用户密码')
+        self.existingPasswordEdit.setEchoMode(QLineEdit.Password)
+        self.existingPasswordEdit.setFixedWidth(300)
+        self.existingPasswordCard.hBoxLayout.addWidget(self.existingPasswordEdit, 0, Qt.AlignRight)
+        self.existingPasswordCard.hBoxLayout.addSpacing(16)
+        self.configGroup.addSettingCard(self.existingPasswordCard)
 
         self.installDirCard = SettingCard(
             FIF.FOLDER, '安装目录',
@@ -1728,6 +1641,7 @@ class DeployInterface(QFrame):
             effect.setOpacity(1.0)
             widget.setGraphicsEffect(effect)
             self._lockEffects[widget] = effect
+        self._toggleExistingWslMode(False)
         self._refreshDeployControls()
 
     def _isDeployRunning(self):
@@ -1749,6 +1663,12 @@ class DeployInterface(QFrame):
         self.deployBtn.setEnabled(not running)
         self.stopBtn.setEnabled(running)
         self.clearBtn.setEnabled(True)
+
+    def _toggleExistingWslMode(self, checked):
+        for widget in [self.usernameCard, self.passwordCard, self.installDirCard]:
+            widget.setVisible(not checked)
+        for widget in [self.existingUsernameCard, self.existingPasswordCard]:
+            widget.setVisible(checked)
 
     def _setDeployLocked(self, locked, message=None):
         self._deployLocked = locked
@@ -1826,14 +1746,30 @@ class DeployInterface(QFrame):
             return
 
         install_dir = self._installDir
-        username = self.usernameEdit.text().strip() or 'llama'
-        password = self.passwordEdit.text()
+        use_existing_wsl = self.useExistingWslCheck.isChecked()
+        if use_existing_wsl:
+            username = self.existingUsernameEdit.text().strip()
+            password = self.existingPasswordEdit.text()
+            distro = getattr(self.window(), '_wslDistro', DEFAULT_DISTRO)
+        else:
+            username = self.usernameEdit.text().strip() or 'llama'
+            password = self.passwordEdit.text()
+            distro = DEFAULT_DISTRO
         model_index = max(0, self.modelPresetCombo.currentIndex())
         model_preset = self.modelPresetKeys[model_index] if self.modelPresetKeys else DEFAULT_MODEL_PRESET_KEY
-        if not install_dir:
+        if not use_existing_wsl and not install_dir:
             InfoBar.error(
                 title='未设置安装目录',
                 content='请选择或输入 WSL 安装目录',
+                orient=Qt.Horizontal, isClosable=False,
+                position=InfoBarPosition.TOP, duration=3000,
+                parent=self.window()
+            )
+            return
+        if use_existing_wsl and not username:
+            InfoBar.error(
+                title='未设置已有 WSL 用户',
+                content='请输入已有 Ubuntu WSL 分发中的用户名',
                 orient=Qt.Horizontal, isClosable=False,
                 position=InfoBarPosition.TOP, duration=3000,
                 parent=self.window()
@@ -1882,6 +1818,8 @@ class DeployInterface(QFrame):
             'AUTODEPLOY_JSON_EVENTS': '1',
             'AUTODEPLOY_RESULT_FILE': self._resultFile,
             'AUTODEPLOY_MODEL_PRESET': model_preset,
+            'AUTODEPLOY_DISTRO': distro,
+            'AUTODEPLOY_USE_EXISTING_WSL': '1' if use_existing_wsl else '0',
             'PYTHONUNBUFFERED': '1',
             'PYTHONUTF8': '1',
             'PYTHONIOENCODING': 'utf-8',
@@ -1903,9 +1841,12 @@ class DeployInterface(QFrame):
             '--install-dir', install_dir,
             '--no-start-server',
             '--model-preset', model_preset,
+            '--distro', distro,
             '--json-events',
             '--result-file', self._resultFile,
         ]
+        if use_existing_wsl:
+            deploy_args.append('--use-existing-wsl')
         if getattr(sys, 'frozen', False):
             command = subprocess.list2cmdline([sys.executable, '--run-autodeploy', *deploy_args])
             deploy_cwd = BASE_DIR
@@ -2139,6 +2080,7 @@ class MainWindow(MSFluentWindow):
         super().__init__()
 
         self._launcherConfig = self._readLauncherConfig()
+        self._wslDistro = DEFAULT_DISTRO
         setTheme(LAUNCHER_THEMES.get(self._launcherConfig.get('theme'), Theme.DARK))
 
         llm_models, mm_models = loadModels()
@@ -2188,7 +2130,7 @@ class MainWindow(MSFluentWindow):
         bi = self.basicInterface
         mi = self.modelInterface
         si = self.serverInterface
-        parts = ['wsl', self._expandedExecPath()]
+        parts = ['wsl', '-d', self._wslDistro, '--', self._expandedExecPath()]
 
         # 模型选择（用实际路径替换显示名）
         llm = bi.llmCombo.currentText()
@@ -2266,6 +2208,13 @@ class MainWindow(MSFluentWindow):
             parts.append('--no-webui')
 
         return ' '.join(parts)
+
+    def _setWslDistro(self, distro):
+        distro = (distro or '').strip() or DEFAULT_DISTRO
+        if distro != self._wslDistro:
+            self._wslDistro = distro
+            if hasattr(self, '_cachedWslUser'):
+                delattr(self, '_cachedWslUser')
 
     def _updateCommandPreview(self):
         self.basicInterface.cmdPreview.setText(self.buildCommand())
@@ -2703,7 +2652,7 @@ class MainWindow(MSFluentWindow):
             return cached
         try:
             result = subprocess.run(
-                ['wsl', '-d', DISTRO, '--', 'sh', '-lc', 'id -un 2>/dev/null || printf llama'],
+                ['wsl', '-d', self._wslDistro, '--', 'sh', '-lc', 'id -un 2>/dev/null || printf llama'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 timeout=10,
@@ -2778,7 +2727,7 @@ for p in "$@"; do
 done
 """
         result = subprocess.run(
-            ['wsl', '-d', DISTRO, '--', 'bash', '-s', '--', *paths],
+            ['wsl', '-d', self._wslDistro, '--', 'bash', '-s', '--', *paths],
             input=script.encode('utf-8'),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -2936,6 +2885,7 @@ done
             'log_verbosity': self._normalizedLogVerbosity(),
             'metrics': si.metricsCombo.currentText(),
             'webui': si.webuiCombo.currentText(),
+            'distro': self._wslDistro,
             'models': {
                 'llm': bi.llmPaths,
                 'mm': bi.mmPaths,
@@ -2960,6 +2910,9 @@ done
         bi = self.basicInterface
         mi = self.modelInterface
         si = self.serverInterface
+        distro = cfg.get('distro')
+        if isinstance(distro, str) and distro.strip():
+            self._setWslDistro(distro)
         models = cfg.get('models', {})
         if isinstance(models, dict):
             llm_models = models.get('llm', {})
@@ -3025,10 +2978,14 @@ done
         bi = self.basicInterface
         mi = self.modelInterface
         si = self.serverInterface
+        distro = result.get('distro')
+        if isinstance(distro, str) and distro.strip():
+            self._setWslDistro(distro)
 
-        llm_name = result.get('llm_model_name') or 'Qwen3.5-27B-UD-Q4_K_XL'
+        model_preset = result.get('model_preset')
+        llm_name = result.get('llm_model_name') or ('Qwen3.5-27B-UD-Q4_K_XL' if model_preset != 'none' else '')
         llm_path = result.get('llm_model_path') or ''
-        mm_name = result.get('mm_model_name') or 'Qwen3.5-mmproj-F16'
+        mm_name = result.get('mm_model_name') or ('Qwen3.5-mmproj-F16' if model_preset != 'none' else '')
         mm_path = result.get('mm_model_path') or ''
 
         if llm_path:
@@ -3036,8 +2993,10 @@ done
         if mm_path:
             bi.mmPaths[mm_name] = mm_path
 
-        self._resetComboItems(bi.llmCombo, list(bi.llmPaths.keys()), llm_name)
-        self._resetComboItems(bi.mmCombo, ['无'] + list(bi.mmPaths.keys()), mm_name if mm_path else '无')
+        if llm_path:
+            self._resetComboItems(bi.llmCombo, list(bi.llmPaths.keys()), llm_name)
+        if mm_path or model_preset == 'none':
+            self._resetComboItems(bi.mmCombo, ['无'] + list(bi.mmPaths.keys()), mm_name if mm_path else '无')
 
         search_paths = self._modelSearchPaths()
         result_search_paths = result.get('model_search_path')

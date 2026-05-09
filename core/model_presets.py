@@ -4,6 +4,13 @@
 DEFAULT_MODEL_PRESET_KEY = "qwen3.5-9b"
 
 MODEL_PRESETS = {
+    "none": {
+        "display_name": "无",
+        "directory": "",
+        "llm_name": "",
+        "mm_name": "",
+        "artifacts": {},
+    },
     "qwen3.5-27b": {
         "display_name": "Qwen3.5-27B UD-Q4_K_XL",
         "directory": "qwen3.5-27b",
